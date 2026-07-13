@@ -6,9 +6,9 @@ Matched with the finalized Peewee SQL Backend and stdout Audit Logging.
 """
 
 import logging
-import time
-from threading import Lock
 
+from itsdangerous import URLSafeTimedSerializer
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route, Router
@@ -32,36 +32,28 @@ from dagster_authkit.utils.templates import render_login_page
 
 logger = logging.getLogger(__name__)
 
-# In-memory CSRF token store with TTL-based expiry
-_csrf_tokens: dict[str, float] = {}
-_csrf_lock = Lock()
-_CSRF_TOKEN_TTL = 3600  # 1 hour
+# Signed CSRF token serializer (double-submit cookie pattern).
+# Stateless: no server-side store required, works across K8s pods.
+# Tokens are valid for 1 hour.
+_csrf_serializer = URLSafeTimedSerializer(config.SECRET_KEY)
+_CSRF_MAX_AGE = 3600
 
 
-def _store_csrf_token(token: str) -> None:
-    """Store a CSRF token with current timestamp for TTL checking."""
-    with _csrf_lock:
-        _csrf_tokens[token] = time.time()
+def _generate_csrf_token() -> str:
+    """Generate a signed CSRF token valid for 1 hour."""
+    raw = SecurityHardening.generate_csrf_token()
+    return _csrf_serializer.dumps({"token": raw})
 
 
-def _validate_and_consume_csrf_token(token: str) -> bool:
-    """Validate a CSRF token and consume it (one-time use)."""
-    with _csrf_lock:
-        created = _csrf_tokens.pop(token, None)
-        if created is None:
-            return False
-        if time.time() - created > _CSRF_TOKEN_TTL:
-            return False
+def _validate_csrf_token(token: str) -> bool:
+    """Validate a signed CSRF token. Returns True if valid and not expired."""
+    if not token:
+        return False
+    try:
+        _csrf_serializer.loads(token, max_age=_CSRF_MAX_AGE)
         return True
-
-
-def _prune_expired_csrf_tokens() -> None:
-    """Remove expired CSRF tokens to prevent memory leak."""
-    now = time.time()
-    with _csrf_lock:
-        expired = [t for t, ts in _csrf_tokens.items() if now - ts > _CSRF_TOKEN_TTL]
-        for t in expired:
-            del _csrf_tokens[t]
+    except Exception:
+        return False
 
 
 def _get_client_ip(request: Request) -> str:
@@ -80,10 +72,8 @@ async def login_page(request: Request) -> Response:
 
     error = request.query_params.get("error", "")
 
-    # Generate CSRF token and store it
-    csrf_token = SecurityHardening.generate_csrf_token()
-    _store_csrf_token(csrf_token)
-    _prune_expired_csrf_tokens()
+    # Generate signed CSRF token (stateless, works across pods)
+    csrf_token = _generate_csrf_token()
 
     html = render_login_page(next_url, error, csrf_token)
 
@@ -100,10 +90,10 @@ async def process_login(request: Request) -> Response:
     if not SecurityHardening.validate_redirect_url(next_url):
         next_url = "/"
 
-    # CSRF validation
+    # CSRF validation (stateless signed token, no server-side store)
     csrf_token = str(form.get("csrf_token", ""))
-    if not _validate_and_consume_csrf_token(csrf_token):
-        logger.warning(f"CSRF validation failed for login attempt")
+    if not _validate_csrf_token(csrf_token):
+        logger.warning("CSRF validation failed for login attempt")
         return RedirectResponse(
             url=f"/auth/login?next={next_url}&error=Invalid+request.", status_code=302
         )
@@ -119,10 +109,11 @@ async def process_login(request: Request) -> Response:
             url=f"/auth/login?next={next_url}&error=Too+many+attempts.", status_code=302
         )
 
-    # 2. Backend Call (Peewee / SQL)
+    # 2. Backend Call (Peewee / SQL / LDAP) — runs in thread pool to avoid
+    #    blocking the async event loop (bcrypt ~250ms + DB/LDAP I/O).
     try:
         backend = get_backend(config.AUTH_BACKEND, config.__dict__)
-        user = backend.authenticate(username, password)
+        user = await run_in_threadpool(backend.authenticate, username, password)
     except Exception as e:
         logger.error(f"Auth Backend Error: {e}")
         log_login_attempt(username, False, client_ip, "BACKEND_ERROR")
