@@ -135,3 +135,58 @@ class TestRateLimiterOrchestrator:
         """Record should return 0 when disabled."""
         rl = RateLimiter(enabled=False)
         assert rl.record_attempt("user") == 0
+
+
+class TestInMemoryRateLimiterOOM:
+    """Verifies OOM prevention (adversarial key flooding)."""
+
+    @pytest.fixture
+    def limiter(self):
+        return InMemoryRateLimiter()
+
+    def test_max_tracked_rejects_new_identifiers(self, limiter):
+        """When at capacity, new identifiers are rate-limited immediately."""
+        # Set a very low max for testability
+        limiter._MAX_TRACKED = 5
+        window = 300
+
+        # Fill up with 5 distinct identifiers
+        for i in range(5):
+            limiter.record_attempt(f"user_{i}", window)
+
+        # 6th identifier should be rejected (returns MAX_TRACKED, which > any max_attempts)
+        count = limiter.record_attempt("user_new", window)
+        assert count == limiter._MAX_TRACKED
+
+    def test_prune_frees_slots(self, limiter):
+        """After pruning expired entries, new identifiers are accepted again."""
+        limiter._MAX_TRACKED = 5
+        window = 1  # 1 second window
+
+        # Fill up
+        for i in range(5):
+            limiter.record_attempt(f"user_{i}", window)
+
+        # Wait for entries to expire
+        import time
+        time.sleep(1.1)
+
+        # Force prune check (bypasses the 60s interval by setting last_cleanup back)
+        limiter._last_cleanup = 0
+        limiter._maybe_prune(window)
+
+        # Should be accepted now
+        count = limiter.record_attempt("user_new", window)
+        assert count < limiter._MAX_TRACKED
+
+    def test_existing_identifiers_not_rejected_at_capacity(self, limiter):
+        """Identifiers already being tracked should still record at capacity."""
+        limiter._MAX_TRACKED = 5
+        window = 300
+
+        for i in range(5):
+            limiter.record_attempt(f"user_{i}", window)
+
+        # user_0 already exists — should accept
+        count = limiter.record_attempt("user_0", window)
+        assert count == 2  # second attempt

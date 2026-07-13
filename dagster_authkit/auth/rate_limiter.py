@@ -73,22 +73,49 @@ class InMemoryRateLimiter(RateLimiterBackend):
     """
     In-memory rate limiter (single-pod only).
 
-    ⚠️ WARNING: Does NOT work across multiple pods/instances!
+    WARNING: Does NOT work across multiple pods/instances!
     Each pod has its own memory, so rate limits are not shared.
 
     Use RedisRateLimiter for distributed deployments.
     """
 
+    # Maximum tracked identifiers before forced cleanup.
+    # Prevents OOM from adversarial key stuffing (random usernames/IPs).
+    _MAX_TRACKED = 10_000
+
     def __init__(self):
-        # Dict: identifier -> [(timestamp1, timestamp2, ...)]
         self._attempts: Dict[str, list] = defaultdict(list)
         self._lock = threading.Lock()
+        self._last_cleanup = time.time()
 
         logger.warning(
-            "⚠️  InMemoryRateLimiter initialized - NOT DISTRIBUTED!\n"
+            "InMemoryRateLimiter initialized - NOT DISTRIBUTED!\n"
             "   This will NOT work correctly in multi-pod Kubernetes deployments.\n"
             "   Set DAGSTER_AUTH_REDIS_URL to enable distributed rate limiting."
         )
+
+    def _maybe_prune(self, window_seconds: int) -> None:
+        """Prune expired entries across the entire dict to prevent OOM from
+        adversarial key stuffing (random identifiers that are never checked again)."""
+        now = time.time()
+        if now - self._last_cleanup < 60:
+            return
+        self._last_cleanup = now
+
+        cutoff = now - window_seconds
+        expired = []
+        for ident, timestamps in self._attempts.items():
+            active = [ts for ts in timestamps if ts > cutoff]
+            if active:
+                self._attempts[ident] = active
+            else:
+                expired.append(ident)
+
+        for ident in expired:
+            del self._attempts[ident]
+
+        if expired:
+            logger.debug(f"Pruned {len(expired)} expired rate-limit entries")
 
     def is_rate_limited(
         self, identifier: str, max_attempts: int, window_seconds: int
@@ -112,10 +139,23 @@ class InMemoryRateLimiter(RateLimiterBackend):
         cutoff = now - window_seconds
 
         with self._lock:
+            # Guard against adversarial key flooding (OOM prevention)
+            if len(self._attempts) >= self._MAX_TRACKED and identifier not in self._attempts:
+                self._maybe_prune(window_seconds)
+                if len(self._attempts) >= self._MAX_TRACKED:
+                    # Still at capacity after pruning — reject new identifiers.
+                    # This is a legitimate rate-limit defense: the attacker
+                    # can't create infinite new buckets.
+                    logger.warning(
+                        f"Rate limiter at capacity ({self._MAX_TRACKED} tracked). "
+                        "Rejecting new identifier to prevent OOM."
+                    )
+                    return self._MAX_TRACKED  # effectively rate-limited
+
             # Add current attempt
             self._attempts[identifier].append(now)
 
-            # Clean old attempts
+            # Clean old attempts for this identifier
             self._attempts[identifier] = [ts for ts in self._attempts[identifier] if ts > cutoff]
 
             # Prune empty entries to prevent memory leak
