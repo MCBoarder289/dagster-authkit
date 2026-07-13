@@ -98,13 +98,13 @@ def get_metrics_collector() -> MetricsCollector:
 
 
 def track_login_attempt(success: bool, username: str = None):
-    """Tracks login attempt."""
+    """Tracks login attempt.
+    Note: username is NOT used as a metric label to prevent:
+    - Information leakage via the public /metrics endpoint
+    - Unbounded label cardinality (DoS via memory exhaustion)
+    """
     status = "success" if success else "failure"
     _metrics.increment_counter("auth_login_attempts_total", {"status": status})
-
-    if not success and username:
-        # Track failures per user (last 100)
-        _metrics.increment_counter("auth_login_failures", {"username": username})
 
 
 def track_request_duration(endpoint: str, duration: float):

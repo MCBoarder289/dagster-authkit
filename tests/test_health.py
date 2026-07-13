@@ -127,11 +127,12 @@ class TestMetricTrackingFunctions:
         assert "auth_login_attempts_total{status=success}" in metrics["counters"]
 
     def test_track_login_attempt_failure(self):
-        """Tracking a failed login should increment failure and per-user counters."""
+        """Tracking a failed login should increment the failure counter."""
         track_login_attempt(False, username="attacker")
         metrics = get_metrics_collector().get_metrics()
         assert "auth_login_attempts_total{status=failure}" in metrics["counters"]
-        assert "auth_login_failures{username=attacker}" in metrics["counters"]
+        # Username is intentionally NOT a metric label to prevent
+        # information leakage via /metrics and unbounded cardinality.
 
     def test_track_rbac_decision(self):
         """RBAC decisions should be tracked with role and action."""
