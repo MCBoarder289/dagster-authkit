@@ -166,6 +166,11 @@ class TestPeeweeAuthBackendAuthentication:
         backend.add_user("authuser", "secret", Role.VIEWER)
         assert backend.authenticate("authuser", "wrong") is None
 
+    def test_authenticate_empty_password(self, backend):
+        """Empty password should always fail (prevents unauthenticated bind attacks)."""
+        backend.add_user("emptyuser", "pass", Role.VIEWER)
+        assert backend.authenticate("emptyuser", "") is None
+
     def test_authenticate_nonexistent_user(self, backend):
         """Nonexistent user should return None."""
         assert backend.authenticate("ghost", "pass") is None

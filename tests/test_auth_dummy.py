@@ -61,6 +61,11 @@ class TestDummyAuthBackend:
         user = backend.authenticate("ghost", "password")
         assert user is None
 
+    def test_authenticate_empty_password(self, backend):
+        """Empty password should always fail (prevents unauthenticated bind attacks)."""
+        user = backend.authenticate("admin", "")
+        assert user is None
+
     def test_authenticate_case_sensitive(self, backend):
         """Usernames and passwords should be case-sensitive."""
         user = backend.authenticate("Admin", "admin")

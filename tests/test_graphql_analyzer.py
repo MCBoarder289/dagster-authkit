@@ -72,7 +72,7 @@ class TestExtractMutationNames:
         assert "__UNPARSEABLE_QUERY__" in mutations
 
     def test_unparseable_query(self):
-        """An unparseable query should return a sentinel set."""
+        """An unparseable query should return the sentinel set."""
         mutations = GraphQLMutationAnalyzer.extract_mutation_names(
             "not valid graphql {{{"
         )
@@ -108,5 +108,58 @@ class TestIsMutation:
         assert GraphQLMutationAnalyzer.is_mutation("query { runs { runId } }") is False
 
     def test_is_mutation_empty(self):
-        """An empty query triggers unparseable sentinel, which contains 1 element -> True."""
-        assert GraphQLMutationAnalyzer.is_mutation("") is True
+        """Empty/unparseable queries are not mutations (security fix)."""
+        assert GraphQLMutationAnalyzer.is_mutation("") is False
+
+
+class TestIsParseable:
+    """Verifies the is_parseable validation method."""
+
+    def test_valid_query_is_parseable(self):
+        """A valid GraphQL query should be parseable."""
+        assert GraphQLMutationAnalyzer.is_parseable("query { runs { runId } }") is True
+
+    def test_empty_string_is_not_parseable(self):
+        """An empty string is not parseable."""
+        assert GraphQLMutationAnalyzer.is_parseable("") is False
+
+    def test_whitespace_is_not_parseable(self):
+        """Whitespace-only input is not parseable."""
+        assert GraphQLMutationAnalyzer.is_parseable("   \n\t  ") is False
+
+    def test_malformed_query_is_not_parseable(self):
+        """A malformed query is not parseable."""
+        assert GraphQLMutationAnalyzer.is_parseable("not valid {{{") is False
+
+    def test_none_is_not_parseable(self):
+        """None is not parseable."""
+        assert GraphQLMutationAnalyzer.is_parseable(None) is False
+
+
+class TestFragmentTraversal:
+    """Verifies that fragment references and inline fragments are traversed."""
+
+    def test_named_fragment_spread(self):
+        """Mutations inside named fragments should be detected."""
+        query = """
+        mutation {
+            ...LaunchOps
+        }
+        fragment LaunchOps on Mutation {
+            launchRun(input: {})
+        }
+        """
+        mutations = GraphQLMutationAnalyzer.extract_mutation_names(query)
+        assert "launchRun" in mutations
+
+    def test_inline_fragment(self):
+        """Mutations inside inline fragments should be detected."""
+        query = """
+        mutation {
+            ... on Mutation {
+                terminateRun(runId: "123")
+            }
+        }
+        """
+        mutations = GraphQLMutationAnalyzer.extract_mutation_names(query)
+        assert "terminateRun" in mutations

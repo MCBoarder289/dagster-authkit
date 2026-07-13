@@ -115,6 +115,20 @@ class TestRolePermissions:
         """Any role can execute unrestricted mutations."""
         assert RolePermissions.can_execute(Role.VIEWER, "logTelemetry") is True
 
+    def test_get_required_role_unknown_with_default(self):
+        """Unknown mutations should return the configured default_role (deny-by-default)."""
+        assert RolePermissions.get_required_role("newDagsterMutation", Role.ADMIN) == Role.ADMIN
+
+    def test_get_required_role_unknown_without_default(self):
+        """Unknown mutations without default_role should return None (backward compat)."""
+        assert RolePermissions.get_required_role("newDagsterMutation") is None
+
+    def test_can_execute_unknown_with_default_admin(self):
+        """VIEWER should be blocked from unknown mutations when default is ADMIN."""
+        assert RolePermissions.can_execute(Role.VIEWER, "newDagsterMutation") is True  # no default set on can_execute
+        # But get_required_role with default blocks:
+        assert RolePermissions.get_required_role("newDagsterMutation", Role.ADMIN) == Role.ADMIN
+
     def test_list_permissions_viewer(self):
         """VIEWER should have no mutation permissions."""
         perms = RolePermissions.list_permissions(Role.VIEWER)

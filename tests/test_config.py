@@ -34,6 +34,34 @@ class TestAuthConfigDefaults:
         cfg = AuthConfig()
         assert cfg.SESSION_MAX_AGE == 86400
 
+    def test_default_unknown_mutation_role(self):
+        """Default unknown mutation role should be ADMIN (deny-by-default)."""
+        cfg = AuthConfig()
+        assert cfg.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE == "ADMIN"
+
+    def test_unknown_mutation_role_from_env(self, monkeypatch):
+        """Unknown mutation role should be configurable via env."""
+        monkeypatch.setenv("DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE", "EDITOR")
+        cfg = AuthConfig()
+        assert cfg.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE == "EDITOR"
+
+    def test_invalid_unknown_mutation_role_raises(self, monkeypatch):
+        """An invalid role should raise ValueError."""
+        monkeypatch.setenv("DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE", "SUPERADMIN")
+        with pytest.raises(ValueError, match="DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE"):
+            AuthConfig()
+
+    def test_default_proxy_trusted_ips(self):
+        """Default trusted IPs should be an empty frozenset (all IPs trusted)."""
+        cfg = AuthConfig()
+        assert cfg.DAGSTER_AUTH_PROXY_TRUSTED_IPS == frozenset()
+
+    def test_proxy_trusted_ips_from_env(self, monkeypatch):
+        """Trusted IPs should be parsed from comma/space-separated env var."""
+        monkeypatch.setenv("DAGSTER_AUTH_PROXY_TRUSTED_IPS", "10.0.0.1, 10.0.0.2")
+        cfg = AuthConfig()
+        assert cfg.DAGSTER_AUTH_PROXY_TRUSTED_IPS == frozenset({"10.0.0.1", "10.0.0.2"})
+
     def test_default_rate_limit_settings(self):
         """Rate limiting should be enabled by default with 5 attempts / 300s."""
         cfg = AuthConfig()

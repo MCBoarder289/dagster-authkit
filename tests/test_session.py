@@ -111,9 +111,7 @@ class TestSessionManager:
         assert sessions.validate("not-a-real-token") is None
 
     def test_revoke_individual_token(self):
-        """Stateless cookie backend: revoke returns True but does not invalidate the token."""
+        """Revoking a single token should invalidate it via the blocklist."""
         token = sessions.create({"username": "revoketest", "role": "VIEWER"})
         assert sessions.revoke(token) is True
-        # With stateless CookieBackend, the token remains valid after revoke.
-        # Server-side invalidation requires revoke_all() which bumps the version.
-        assert sessions.validate(token) is not None
+        assert sessions.validate(token) is None

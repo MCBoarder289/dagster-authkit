@@ -84,6 +84,10 @@ class TestValidateRedirectUrl:
         # Path-like URLs without http:// should still work as relative
         pass
 
+    def test_protocol_relative_url_rejected(self):
+        """Protocol-relative URLs (//evil.com) should be rejected to prevent open redirect."""
+        assert SecurityHardening.validate_redirect_url("//evil.com") is False
+
     def test_javascript_scheme_rejected(self):
         """javascript: scheme should be rejected."""
         assert SecurityHardening.validate_redirect_url("javascript:alert(1)") is False
