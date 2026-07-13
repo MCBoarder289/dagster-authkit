@@ -19,7 +19,7 @@ class AuthConfig:
         self.SESSION_COOKIE_NAME = os.getenv("DAGSTER_AUTH_COOKIE_NAME", "dagster_session")
         self.SESSION_MAX_AGE = int(os.getenv("DAGSTER_AUTH_SESSION_MAX_AGE", "86400"))  # 24h
         self.SESSION_COOKIE_SECURE = (
-            os.getenv("DAGSTER_AUTH_COOKIE_SECURE", "false").lower() == "true"
+            os.getenv("DAGSTER_AUTH_COOKIE_SECURE", "true").lower() == "true"
         )
         self.SESSION_COOKIE_HTTPONLY = True  # Always True for security
         self.SESSION_COOKIE_SAMESITE = os.getenv("DAGSTER_AUTH_COOKIE_SAMESITE", "lax")
@@ -86,6 +86,25 @@ class AuthConfig:
         self.DAGSTER_AUTH_PROXY_LOGOUT_URL = os.getenv(
             "DAGSTER_AUTH_PROXY_LOGOUT_URL", "https://auth.company.com/logout"
         )
+
+        # Trusted proxy IPs (space/comma-separated). When set, only requests
+        # from these IPs may use proxy auth headers. Protects against header
+        # spoofing when the pod is reachable outside the proxy.
+        raw_ips = os.getenv("DAGSTER_AUTH_PROXY_TRUSTED_IPS", "")
+        self.DAGSTER_AUTH_PROXY_TRUSTED_IPS = frozenset(
+            ip.strip() for ip in raw_ips.replace(",", " ").split() if ip.strip()
+        )
+
+        # RBAC: role required for GraphQL mutations not in any explicit list.
+        # Default: ADMIN (deny-by-default). Set to "VIEWER" for open-by-default.
+        raw_unknown_role = os.getenv("DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE", "ADMIN").upper()
+        valid_roles = {"VIEWER", "LAUNCHER", "EDITOR", "ADMIN"}
+        if raw_unknown_role not in valid_roles:
+            raise ValueError(
+                f"Invalid DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE: {raw_unknown_role}. "
+                f"Must be one of: {', '.join(sorted(valid_roles))}"
+            )
+        self.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE = raw_unknown_role
 
         # Admin Bootstrap (Used by SQL Backend)
         self.ADMIN_PASSWORD = os.getenv("DAGSTER_AUTH_ADMIN_PASSWORD", "")

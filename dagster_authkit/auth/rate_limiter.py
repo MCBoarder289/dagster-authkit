@@ -118,6 +118,11 @@ class InMemoryRateLimiter(RateLimiterBackend):
             # Clean old attempts
             self._attempts[identifier] = [ts for ts in self._attempts[identifier] if ts > cutoff]
 
+            # Prune empty entries to prevent memory leak
+            if not self._attempts[identifier]:
+                del self._attempts[identifier]
+                return 0
+
             return len(self._attempts[identifier])
 
     def reset(self, identifier: str) -> None:

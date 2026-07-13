@@ -82,12 +82,24 @@ class RedisBackend(SessionBackend):
 
 
 class CookieBackend(SessionBackend):
-    """Stateless but with versioning for global revocation."""
+    """Stateless but with versioning for global revocation and a blocklist for individual tokens."""
 
     def __init__(self, secret_key: str, max_age: int):
         self.serializer = URLSafeTimedSerializer(secret_key)
         self.max_age = max_age
         self._versions: Dict[str, int] = {}
+        self._revoked: Dict[str, float] = {}  # token -> expiry timestamp
+        import threading
+        self._lock = threading.Lock()
+
+    def _prune_expired_revocations(self) -> None:
+        """Remove expired entries from the revocation blocklist to prevent memory leak."""
+        import time
+        now = time.time()
+        with self._lock:
+            expired = [t for t, exp in self._revoked.items() if now >= exp]
+            for t in expired:
+                del self._revoked[t]
 
     def create(self, user_data: Dict[str, Any]) -> str:
         v = self._versions.get(user_data["username"], 1)
@@ -98,12 +110,36 @@ class CookieBackend(SessionBackend):
             data = self.serializer.loads(token, max_age=self.max_age)
             if data.get("_v") != self._versions.get(data.get("username"), 1):
                 return None
+
+            import time
+            with self._lock:
+                if token in self._revoked:
+                    # Check if revocation has expired
+                    if time.time() >= self._revoked[token]:
+                        del self._revoked[token]
+                    else:
+                        return None
+
             return data
-        except:
+        except Exception:
             return None
 
     def revoke(self, token: str) -> bool:
-        """Stateless: nothing to do server-side, browser deletes the cookie."""
+        """Revoke a single token by adding it to the revocation blocklist.
+        The blocklist entry expires after max_age seconds to prevent unbounded growth."""
+        try:
+            import time
+            # Try to load the token to get its remaining lifetime
+            data = self.serializer.loads(token, max_age=self.max_age)
+            # Set expiry to match the token's natural expiration
+            expiry = time.time() + self.max_age
+        except Exception:
+            # If token is invalid, still add to blocklist with default TTL
+            expiry = time.time() + self.max_age
+
+        with self._lock:
+            self._revoked[token] = expiry
+        self._prune_expired_revocations()
         return True
 
     def revoke_all(self, username: str) -> int:

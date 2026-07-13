@@ -20,7 +20,7 @@ class AuditLogger:
         self.env = os.getenv("DAGSTER_AUTH_ENV", "production")
 
     def _emit(self, event: Dict[str, Any]):
-        """Cuspe o JSON puro no stdout."""
+        """Emit a pure JSON event to stdout."""
         event["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         event["service"] = self.service
         event["env"] = self.env

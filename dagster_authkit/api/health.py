@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from starlette.responses import JSONResponse
@@ -135,7 +135,7 @@ def get_health_status() -> Dict[str, Any]:
 
     health = {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "0.3.0",
         "backend": config.AUTH_BACKEND,
         "checks": {},
