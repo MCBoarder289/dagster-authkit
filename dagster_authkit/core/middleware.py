@@ -21,7 +21,7 @@ from dagster_authkit.api.health import health_endpoint, metrics_endpoint, track_
 from dagster_authkit.auth.backends.base import Role, AuthUser, RolePermissions
 from dagster_authkit.auth.security import SecurityHardening
 from dagster_authkit.auth.session import sessions
-from dagster_authkit.core.graphql_analyzer import GraphQLMutationAnalyzer
+from dagster_authkit.core.graphql_analyzer import GraphQLMutationAnalyzer, _SENTINEL_UNPARSEABLE
 from dagster_authkit.core.registry import get_backend
 from dagster_authkit.utils.audit import log_access_control
 from dagster_authkit.utils.config import config
@@ -104,7 +104,6 @@ class DagsterAuthMiddleware:
 
         if not user:
             logger.warning(f"WebSocket auth failed for {path}")
-            await send({"type": "websocket.accept"})
             await send({"type": "websocket.close", "code": _WS_CLOSE_UNAUTHORIZED, "reason": "Unauthorized"})
             return
 
@@ -176,6 +175,8 @@ class DagsterAuthMiddleware:
                 return
 
         # --- RBAC: GraphQL HTTP mutations ---
+        downstream_receive = receive
+
         if path == "/graphql" and method == "POST":
             body = await request.body()
             graphql_data = self._parse_json(body)
@@ -185,7 +186,12 @@ class DagsterAuthMiddleware:
                 query_str = g_item.get("query", "")
                 operation_name = g_item.get("operationName") or None
 
-                if not GraphQLMutationAnalyzer.is_parseable(query_str):
+                # Single parse: extract_mutation_names returns sentinel for invalid queries
+                mutation_names = GraphQLMutationAnalyzer.extract_mutation_names(
+                    query_str, operation_name=operation_name
+                )
+
+                if _SENTINEL_UNPARSEABLE in mutation_names:
                     logger.warning(f"Rejected unparseable GraphQL query from {user.username}")
                     response = Response(
                         content='{"errors":[{"message":"Invalid GraphQL query"}]}',
@@ -194,10 +200,6 @@ class DagsterAuthMiddleware:
                     )
                     await response(scope, receive, send)
                     return
-
-                mutation_names = GraphQLMutationAnalyzer.extract_mutation_names(
-                    query_str, operation_name=operation_name
-                )
 
                 if not mutation_names:
                     continue
@@ -217,12 +219,11 @@ class DagsterAuthMiddleware:
                     if required_role:
                         track_rbac_decision(True, user.role.name, mutation_name)
 
-            # Rebuild request with consumed body so downstream can read it
+            # Rebuild receive with consumed body so downstream can read it
             async def _receive():
-                return {"type": "http.request", "body": body}
+                return {"type": "http.request", "body": body, "more_body": False}
 
-            scope = dict(scope)
-            request = Request(scope, _receive)
+            downstream_receive = _receive
 
         elif method in self.WRITE_METHODS and not user.can(self._rest_write_role):
             self._log_denied(
@@ -241,7 +242,7 @@ class DagsterAuthMiddleware:
             scope["state"] = {}
         scope["state"]["user"] = user
 
-        await self._passthrough(scope, receive, send)
+        await self._passthrough(scope, downstream_receive, send)
 
     async def _passthrough(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Pass the request to the inner app, injecting security headers on the response."""

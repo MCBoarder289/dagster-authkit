@@ -183,8 +183,9 @@ class RedisRateLimiter(RateLimiterBackend):
             return is_limited, attempts
         except Exception as e:
             logger.error(f"Redis rate limit check failed: {e}")
-            # Fail open (don't block on Redis errors)
-            return False, 0
+            # Fail-closed: block logins if Redis is unreachable.
+            # Legitimate users with an existing session continue unaffected.
+            return True, max_attempts
 
     def record_attempt(self, identifier: str, window_seconds: int) -> int:
         key = f"ratelimit:{identifier}"
@@ -265,6 +266,30 @@ class RateLimiter:
             f"Rate limiter configured: {max_attempts} attempts / {window_seconds}s "
             f"({'enabled' if enabled else 'disabled'})"
         )
+
+    def check_and_record(self, identifier: str) -> Tuple[bool, int]:
+        """
+        Atomically record a login attempt and check if rate limited.
+
+        Eliminates the TOCTOU race condition between is_rate_limited() and
+        record_attempt() that exists when they're called separately.
+
+        Returns:
+            Tuple[bool, int]: (is_limited, attempts_count)
+            If is_limited is True, the attempt was NOT recorded
+            (the user was already over the limit).
+        """
+        if not self.enabled:
+            return False, 0
+
+        # Check first — if already limited, don't record
+        is_limited, count = self.is_rate_limited(identifier)
+        if is_limited:
+            return True, count
+
+        # Not yet limited, record the attempt atomically
+        new_count = self.backend.record_attempt(identifier, self.window_seconds)
+        return new_count >= self.max_attempts, new_count
 
     def record_attempt(self, identifier: str) -> int:
         """

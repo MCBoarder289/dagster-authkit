@@ -6,6 +6,7 @@ Allows external plugins without modifying core code.
 """
 
 import logging
+import threading
 from importlib.metadata import entry_points
 from typing import Any, Dict, Type
 
@@ -25,6 +26,7 @@ class BackendRegistry:
     _backends: Dict[str, Type[AuthBackend]] = {}
     _instances: Dict[str, AuthBackend] = {}
     _initialized: bool = False
+    _lock = threading.Lock()
 
     @classmethod
     def discover_backends(cls) -> None:
@@ -39,88 +41,90 @@ class BackendRegistry:
         if cls._initialized:
             return
 
-        logger.info("🔍 Discovering authentication backends...")
+        with cls._lock:
+            if cls._initialized:
+                return
 
-        try:
-            # Python 3.10+ API
-            discovered = entry_points(group="dagster_auth.backends")
-        except TypeError:
-            # Python 3.9 fallback
-            all_eps = entry_points()
-            discovered = all_eps.get("dagster_auth.backends", [])
+            logger.info("Discovering authentication backends...")
 
-        for entry_point in discovered:
             try:
-                backend_class = entry_point.load()
+                # Python 3.10+ API
+                discovered = entry_points(group="dagster_auth.backends")
+            except TypeError:
+                # Python 3.9 fallback
+                all_eps = entry_points()
+                discovered = all_eps.get("dagster_auth.backends", [])
 
-                # Validate it's a proper AuthBackend subclass
-                if not issubclass(backend_class, AuthBackend):
-                    logger.warning(
-                        f"⚠️  Backend '{entry_point.name}' is not a subclass of AuthBackend, skipping"
-                    )
-                    continue
+            for entry_point in discovered:
+                try:
+                    backend_class = entry_point.load()
 
-                cls._backends[entry_point.name] = backend_class
-                logger.info(f"✅ Registered backend: {entry_point.name}")
+                    if not issubclass(backend_class, AuthBackend):
+                        logger.warning(
+                            f"Backend '{entry_point.name}' is not a subclass of AuthBackend, skipping"
+                        )
+                        continue
 
-            except Exception as e:
-                logger.error(f"❌ Failed to load backend '{entry_point.name}': {e}")
+                    cls._backends[entry_point.name] = backend_class
+                    logger.info(f"Registered backend: {entry_point.name}")
 
-        cls._initialized = True
+                except Exception as e:
+                    logger.error(f"Failed to load backend '{entry_point.name}': {e}")
 
-        if cls._backends:
-            logger.info(f"🎉 Backend discovery complete. Available: {list(cls._backends.keys())}")
-        else:
-            logger.warning("⚠️  No backends discovered! Check entry points configuration.")
+            cls._initialized = True
+
+            if cls._backends:
+                logger.info(f"Backend discovery complete. Available: {list(cls._backends.keys())}")
+            else:
+                logger.warning("No backends discovered! Check entry points configuration.")
 
     @classmethod
     def get_backend(cls, name: str, config: Dict[str, Any]) -> AuthBackend:
         """
         Instantiates a backend by name.
 
+        The config dict is only used on the first call for a given backend
+        name. Subsequent calls return the cached instance regardless of config.
+
         Args:
             name: Backend name (sqlite, ldap, oauth, dummy)
-            config: Configuration to pass to backend (usually config.__dict__)
+            config: Configuration dict (only used on first call)
 
         Returns:
             Initialized AuthBackend instance
 
         Raises:
             ValueError: If backend doesn't exist
-
-        Example:
-            >>> from dagster_authkit.core.registry import get_backend
-            >>> from dagster_authkit.utils.config import config
-            >>> backend = get_backend('sqlite', config.__dict__)
-            >>> user = backend.authenticate('admin', 'password123')
         """
-        # Ensure backends are discovered
         if not cls._initialized:
             cls.discover_backends()
 
-        # Check if backend exists
-        if name not in cls._backends:
-            available = ", ".join(cls._backends.keys()) if cls._backends else "none"
-            raise ValueError(
-                f"Unknown backend: '{name}'. "
-                f"Available backends: {available}. "
-                f"Check pyproject.toml [project.entry-points] configuration."
-            )
-
-        # Return cached instance if available (avoids reconnect + create_tables per request)
+        # Fast path: already cached
         if name in cls._instances:
             return cls._instances[name]
 
-        backend_class = cls._backends[name]
+        with cls._lock:
+            # Double-check inside lock
+            if name in cls._instances:
+                return cls._instances[name]
 
-        try:
-            backend = backend_class(config)
-            cls._instances[name] = backend
-            logger.info(f"Initialized backend: {name} ({backend.get_name()})")
-            return backend
-        except Exception as e:
-            logger.error(f"Failed to initialize backend '{name}': {e}", exc_info=True)
-            raise RuntimeError(f"Backend initialization failed: {e}") from e
+            if name not in cls._backends:
+                available = ", ".join(cls._backends.keys()) if cls._backends else "none"
+                raise ValueError(
+                    f"Unknown backend: '{name}'. "
+                    f"Available backends: {available}. "
+                    f"Check pyproject.toml [project.entry-points] configuration."
+                )
+
+            backend_class = cls._backends[name]
+            try:
+                backend = backend_class(config)
+                cls._instances[name] = backend
+                logger.info(f"Initialized backend: {name} ({backend.get_name()})")
+                return backend
+            except Exception as e:
+                logger.error(f"Failed to initialize backend '{name}': {e}", exc_info=True)
+                raise RuntimeError(f"Backend initialization failed: {e}") from e
 
     @classmethod
     def list_backends(cls) -> list:

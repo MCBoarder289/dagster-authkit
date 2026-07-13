@@ -5,6 +5,7 @@ Login/logout endpoints + HTML pages.
 Matched with the finalized Peewee SQL Backend and stdout Audit Logging.
 """
 
+import hashlib
 import logging
 
 from itsdangerous import URLSafeTimedSerializer
@@ -14,8 +15,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route, Router
 
 from dagster_authkit.auth.rate_limiter import (
-    is_rate_limited,
-    record_login_attempt,
+    get_rate_limiter,
     reset_rate_limit,
 )
 from dagster_authkit.auth.security import SecurityHardening
@@ -32,9 +32,8 @@ from dagster_authkit.utils.templates import render_login_page
 
 logger = logging.getLogger(__name__)
 
-# Signed CSRF token serializer (double-submit cookie pattern).
-# Stateless: no server-side store required, works across K8s pods.
-# Tokens are valid for 1 hour.
+# Stateless synchronizer token pattern (valid for 1 hour).
+# Tokens are signed, not stored server-side — works across K8s pods.
 _csrf_serializer = URLSafeTimedSerializer(config.SECRET_KEY)
 _CSRF_MAX_AGE = 3600
 
@@ -57,11 +56,16 @@ def _validate_csrf_token(token: str) -> bool:
 
 
 def _get_client_ip(request: Request) -> str:
-    """Helper to get real IP behind K8s Ingress (X-Forwarded-For)."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """Get real client IP, only trusting X-Forwarded-For from known proxies."""
+    client_host = request.client.host if request.client else "unknown"
+
+    # Only trust X-Forwarded-For if the connection comes from a trusted proxy.
+    # Otherwise, an attacker can spoof the header to bypass IP-based rate limiting.
+    if client_host in config.DAGSTER_AUTH_PROXY_TRUSTED_IPS:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return client_host
 
 
 async def login_page(request: Request) -> Response:
@@ -100,12 +104,11 @@ async def process_login(request: Request) -> Response:
 
     client_ip = _get_client_ip(request)
     ip_identifier = f"ip:{client_ip}"
+    rl = get_rate_limiter()
 
-    # 1. Rate Limiting Check (username + IP, independent limits)
-    # Username prevents brute-force on a single account.
-    # IP prevents credential spraying across many accounts.
-    user_limited, user_attempts = is_rate_limited(username)
-    ip_limited, ip_attempts = is_rate_limited(ip_identifier)
+    # 1. Rate Limiting Check (username + IP, independent, atomic)
+    user_limited, user_attempts = rl.check_and_record(username)
+    ip_limited, ip_attempts = rl.check_and_record(ip_identifier)
     if user_limited or ip_limited:
         total = max(user_attempts, ip_attempts)
         log_login_attempt(username, False, client_ip, f"RATE_LIMIT ({total} attempts)")
@@ -128,8 +131,7 @@ async def process_login(request: Request) -> Response:
 
     # 3. Validation
     if not user:
-        record_login_attempt(username)
-        record_login_attempt(ip_identifier)
+        # Attempt already recorded by check_and_record above
         log_login_attempt(username, False, client_ip, "INVALID_CREDENTIALS")
         return RedirectResponse(
             url=f"/auth/login?next={next_url}&error=Invalid+credentials.", status_code=302
@@ -142,7 +144,8 @@ async def process_login(request: Request) -> Response:
 
     session_token = sessions.create(user.to_dict())
 
-    log_audit_event("SESSION_CREATED", username, session_id=session_token[:16], ip=client_ip)
+    session_hash = hashlib.sha256(session_token.encode()).hexdigest()[:16]
+    log_audit_event("SESSION_CREATED", username, session_id=session_hash, ip=client_ip)
 
     response = RedirectResponse(url=next_url, status_code=302)
     response.set_cookie(
@@ -164,8 +167,6 @@ async def logout(request: Request) -> Response:
     - Proxy mode: Redirects to Authelia logout URL
     - Session mode: Revokes local session cookie
     """
-    from dagster_authkit.utils.config import config
-
     if config.AUTH_BACKEND == "proxy":
         logout_url = config.DAGSTER_AUTH_PROXY_LOGOUT_URL
         logger.info(f"Proxy mode: Redirecting logout to {logout_url}")
