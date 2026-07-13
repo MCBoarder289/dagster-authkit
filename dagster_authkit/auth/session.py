@@ -18,21 +18,82 @@ logger = logging.getLogger(__name__)
 
 
 class SessionBackend(ABC):
-    @abstractmethod
-    def create(self, user_data: Dict[str, Any]) -> str: ...
+    """
+    Abstract base class for session storage backends.
+
+    Implementations:
+    - ``RedisBackend``: Stateful, multi-pod safe, stores sessions in Redis.
+    - ``CookieBackend``: Stateless signed cookies with optional
+      DB-backed session versioning for cross-pod revocation.
+    """
 
     @abstractmethod
-    def validate(self, token: str) -> Optional[Dict[str, Any]]: ...
+    def create(self, user_data: Dict[str, Any]) -> str:
+        """
+        Persist a new session.
+
+        Args:
+            user_data: Dict with ``username``, ``role``, ``email``, ``full_name``.
+
+        Returns:
+            Opaque session token string to be set as a cookie.
+        """
+        ...
 
     @abstractmethod
-    def revoke(self, token: str) -> bool: ...
+    def validate(self, token: str) -> Optional[Dict[str, Any]]:
+        """
+        Validate a session token.
+
+        Args:
+            token: Opaque session token (from cookie).
+
+        Returns:
+            Original ``user_data`` dict if valid, ``None`` otherwise.
+        """
+        ...
 
     @abstractmethod
-    def revoke_all(self, username: str) -> int: ...
+    def revoke(self, token: str) -> bool:
+        """
+        Revoke a single session token.
+
+        Args:
+            token: Session token to invalidate.
+
+        Returns:
+            ``True`` if the token existed and was revoked.
+        """
+        ...
+
+    @abstractmethod
+    def revoke_all(self, username: str) -> int:
+        """
+        Revoke ALL active sessions for a user.
+
+        Args:
+            username: User whose sessions should be terminated.
+
+        Returns:
+            Number of sessions revoked.
+        """
+        ...
 
 
 class RedisBackend(SessionBackend):
+    """
+    Redis-based session storage (stateful, multi-pod safe).
+
+    Uses ``SETEX`` for token storage and Redis ``SET`` for per-user
+    token indexing, enabling efficient ``revoke_all``.
+
+    Args:
+        redis_url: Redis connection URL (``redis://`` or ``rediss://``).
+        max_age:   Session TTL in seconds.
+    """
+
     def __init__(self, redis_url: str, max_age: int):
+        """Initialise Redis connection."""
         import redis
 
         self.client = redis.from_url(redis_url, decode_responses=True)
@@ -72,13 +133,18 @@ class RedisBackend(SessionBackend):
 
 
 class CookieBackend(SessionBackend):
-    """Stateless signed-cookie sessions with optional DB-backed versioning.
+    """
+    Stateless signed-cookie sessions with optional DB-backed versioning.
 
-    Version resolution is lazy: the first create() or validate() call
-    attempts to read session_version from the DB. If that fails, it falls
-    back to in-memory versioning (single-pod only).
+    Version resolution is lazy: the first ``create()`` or ``validate()``
+    call attempts to resolve a version getter from the SQL backend. If
+    successful, ``revoke_all`` becomes multi-pod safe via the database.
 
-    Individual revoke() is always process-local (best-effort without Redis).
+    Individual ``revoke()`` is always process-local (best-effort without Redis).
+
+    Args:
+        secret_key: HMAC signing secret for cookie serialization.
+        max_age:    Session TTL in seconds.
     """
 
     _VERSION_CACHE_TTL = 10.0  # seconds
@@ -94,11 +160,10 @@ class CookieBackend(SessionBackend):
         self._version_getter_resolved: bool = False
 
     def _resolve_version_getter(self) -> None:
-        """Lazily try to build a DB-backed session version getter.
+        """Lazily build a DB-backed session version getter based on config.
 
-        Called once on the first create()/validate(). Attempts to resolve
-        AND validate the getter. If either step fails, version_getter stays
-        None and we fall back to in-memory.
+        No DB probing is done here — the decision is purely config-based.
+        Runtime DB errors are handled fail-closed by _current_version().
         """
         if self._version_getter_resolved:
             return
@@ -116,17 +181,14 @@ class CookieBackend(SessionBackend):
 
         try:
             from dagster_authkit.auth.backends.sql import PeeweeAuthBackend
-            # Probe: verify the getter is functional (DB bound and reachable).
-            # A failing call means we can't use DB-backed sessions.
-            PeeweeAuthBackend.get_session_version("__authkit_probe__")
             self._version_getter = PeeweeAuthBackend.get_session_version
             logger.info(
                 "CookieBackend: DB-backed session version enabled "
                 "(multi-pod safe for revoke_all; individual logout is best-effort)"
             )
-        except Exception as e:
-            logger.warning(
-                f"CookieBackend: could not enable DB-backed session version: {e}. "
+        except ImportError as e:
+            logger.error(
+                f"CookieBackend: Failed to import SQL backend for version getter: {e}. "
                 "Session revocation will be single-pod only."
             )
 
@@ -242,7 +304,22 @@ class CookieBackend(SessionBackend):
 
 
 class SessionManager:
+    """
+    Facade that auto-selects the session backend based on configuration.
+
+    - If ``DAGSTER_AUTH_REDIS_URL`` is set: uses ``RedisBackend``.
+    - Otherwise: uses ``CookieBackend`` (stateless signed cookies with
+      optional DB-backed session versioning for SQL backends).
+
+    Usage::
+
+        token = sessions.create(user.to_dict())
+        user_data = sessions.validate(token)
+        sessions.revoke(token)
+    """
+
     def __init__(self):
+        """Initialise and auto-select the session backend."""
         from dagster_authkit.utils.config import config
 
         redis_url = getattr(config, "REDIS_URL", os.getenv("DAGSTER_AUTH_REDIS_URL"))

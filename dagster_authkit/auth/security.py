@@ -121,17 +121,21 @@ class SecurityHardening:
     @staticmethod
     def set_security_headers(response):
         """
-        Adds mandatory security headers to response.
+        Add mandatory security headers to a Starlette Response object.
 
         Applied headers:
-        - X-Frame-Options: Prevents clickjacking
-        - X-Content-Type-Options: Prevents MIME sniffing
-        - X-XSS-Protection: Enables XSS filter (old browsers)
-        - Referrer-Policy: Controls referrer leakage
-        - Content-Security-Policy: Restricts resources
+        - ``X-Frame-Options: DENY``
+        - ``X-Content-Type-Options: nosniff``
+        - ``X-XSS-Protection: 1; mode=block``
+        - ``Referrer-Policy: strict-origin-when-cross-origin``
+        - ``Content-Security-Policy`` with script/worker/style/img/font/connect directives
+        - ``Permissions-Policy`` restricting geolocation, microphone, camera
 
         Args:
-            response: Starlette Response object
+            response: Starlette ``Response`` object (headers are mutated in-place).
+
+        Returns:
+            The same response object (for chaining).
         """
         security_headers = {
             "X-Frame-Options": "DENY",

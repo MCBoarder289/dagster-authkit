@@ -84,6 +84,7 @@ class InMemoryRateLimiter(RateLimiterBackend):
     _MAX_TRACKED = 10_000
 
     def __init__(self):
+        """Initialise thread-safe in-memory attempt store with OOM protection."""
         self._attempts: Dict[str, list] = defaultdict(list)
         self._lock = threading.Lock()
         self._last_cleanup = time.time()
@@ -187,6 +188,16 @@ class RedisRateLimiter(RateLimiterBackend):
     """
 
     def __init__(self, redis_url: str):
+        """
+        Initialise Redis connection.
+
+        Args:
+            redis_url: Redis connection URL (``redis://`` or ``rediss://``).
+
+        Raises:
+            RuntimeError: If the ``redis`` package is not installed or
+                          the connection fails.
+        """
         try:
             import redis
 
@@ -276,13 +287,14 @@ class RateLimiter:
         redis_url: Optional[str] = None,
     ):
         """
-        Initialize rate limiter.
+        Initialise the rate limiter, auto-selecting the backend.
 
         Args:
-            max_attempts: Maximum allowed attempts within window
-            window_seconds: Time window in seconds
-            enabled: If False, rate limiting is disabled
-            redis_url: Redis connection URL (optional, auto-detected)
+            max_attempts:  Maximum allowed attempts within the window.
+            window_seconds: Time window in seconds.
+            enabled:       If ``False``, rate limiting is disabled entirely.
+            redis_url:     Redis connection URL. Auto-detected from
+                           ``DAGSTER_AUTH_REDIS_URL`` if not provided.
         """
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
