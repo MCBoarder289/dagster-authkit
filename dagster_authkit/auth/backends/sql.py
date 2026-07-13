@@ -12,7 +12,6 @@ from playhouse.db_url import connect
 
 from dagster_authkit.auth.backends.base import AuthBackend, AuthUser, Role
 from dagster_authkit.auth.security import SecurityHardening
-from dagster_authkit.auth.session import sessions
 from dagster_authkit.utils.audit import log_audit_event
 
 logger = logging.getLogger(__name__)
@@ -32,6 +31,7 @@ class UserTable(Model):
     is_active = BooleanField(default=True)
     created_at = DateTimeField(default=lambda: datetime.now(timezone.utc))
     last_login = DateTimeField(null=True)
+    session_version = IntegerField(default=1)  # Bumped on revoke_all, change_password, change_role, delete_user
 
     class Meta:
         table_name = "users"
@@ -59,6 +59,10 @@ class PeeweeAuthBackend(AuthBackend):
 
             # Idempotent table creation
             self.db.create_tables([UserTable])
+
+            # Migration: add session_version column if upgrading from pre-v0.4
+            self._migrate_session_version()
+
             self._bootstrap_admin()
 
             logger.info(f"PeeweeAuthBackend: Initialized using {type(self.db).__name__}")
@@ -147,12 +151,11 @@ class PeeweeAuthBackend(AuthBackend):
             return False
 
     def delete_user(self, username: str, performed_by: str = "system") -> bool:
-        """Deactivates user (soft delete) and revokes all active sessions."""
+        """Deactivates user (soft delete) and bumps session version to revoke all sessions."""
         query = UserTable.update(is_active=False).where(UserTable.username == username)
 
         if query.execute() > 0:
-            # Force global session invalidation
-            sessions.revoke_all(username)
+            self._bump_session_version(username)
             log_audit_event("USER_DELETED", performed_by, target=username)
             return True
         return False
@@ -160,19 +163,13 @@ class PeeweeAuthBackend(AuthBackend):
     def change_password(
         self, username: str, new_password: str, performed_by: str = "system"
     ) -> bool:
-        """
-        Updates password hash and revokes all active sessions for THIS user.
-        """
+        """Updates password hash and bumps session version to revoke all sessions."""
         query = UserTable.update(password_hash=SecurityHardening.hash_password(new_password)).where(
             UserTable.username == username
         )
 
         if query.execute() > 0:
-            # Only revoke sessions for this specific user, not globally
-            from dagster_authkit.auth.session import sessions
-
-            sessions.revoke_all(username)
-
+            self._bump_session_version(username)
             log_audit_event("PASSWORD_CHANGED", performed_by, target=username)
             return True
         return False
@@ -193,21 +190,58 @@ class PeeweeAuthBackend(AuthBackend):
         ]
 
     def change_role(self, username: str, new_role: Role, performed_by: str = "system") -> bool:
-        """Updates user role, revokes all active sessions, and logs the permission change."""
+        """Updates user role and bumps session version to propagate the change."""
         query = UserTable.update(role_value=new_role.value).where(UserTable.username == username)
 
         if query.execute() > 0:
-            # Revoke all sessions: the old role is still cached in the cookie
-            from dagster_authkit.auth.session import sessions
-            sessions.revoke_all(username)
-
+            self._bump_session_version(username)
             log_audit_event("ROLE_CHANGED", performed_by, target=username, new_role=new_role.name)
             return True
         return False
 
+    def _bump_session_version(self, username: str) -> None:
+        """Increment session_version to invalidate all existing sessions for a user.
+        This is the DB-backed source of truth for cross-pod session revocation."""
+        UserTable.update(session_version=UserTable.session_version + 1).where(
+            UserTable.username == username
+        ).execute()
+
+    @staticmethod
+    def get_session_version(username: str) -> int:
+        """Get the current session_version for a user. Returns 1 if user not found."""
+        if UserTable._meta.database is None:
+            raise RuntimeError("UserTable has no database bound; PeeweeAuthBackend not initialized")
+        try:
+            user = UserTable.get(UserTable.username == username)
+            return user.session_version
+        except DoesNotExist:
+            return 1
+
     # ========================================
     # Private Helpers
     # ========================================
+
+    def _migrate_session_version(self):
+        """Add session_version column to existing databases (pre-v0.4 upgrade).
+
+        Peewee's create_tables() does not alter existing tables, so users
+        upgrading from v0.3.x need the column added. Fails the boot because
+        the column is required for cross-pod session revocation.
+        """
+        try:
+            columns = [col.name for col in self.db.get_columns("users")]
+            if "session_version" in columns:
+                return
+            self.db.execute_sql(
+                "ALTER TABLE users ADD COLUMN session_version INTEGER DEFAULT 1"
+            )
+            logger.info("Migration: added session_version column to users table")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to add session_version column to users table: {e}\n"
+                "This column is required for session revocation.\n"
+                "Run manually: ALTER TABLE users ADD COLUMN session_version INTEGER DEFAULT 1"
+            ) from e
 
     def _bootstrap_admin(self):
         """Auto-creates admin user if specified in configuration."""

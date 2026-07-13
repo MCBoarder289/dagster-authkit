@@ -99,6 +99,8 @@ class TestAuthConfigValidation:
     def test_valid_auth_backends(self, monkeypatch, backend):
         """All valid backend names should be accepted."""
         monkeypatch.setenv("DAGSTER_AUTH_BACKEND", backend)
+        if backend == "proxy":
+            monkeypatch.setenv("DAGSTER_AUTH_PROXY_TRUSTED_IPS", "10.0.0.1")
         cfg = AuthConfig()
         assert cfg.AUTH_BACKEND == backend
 

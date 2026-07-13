@@ -15,12 +15,11 @@ class AuthConfig:
         self.ENV = os.getenv("DAGSTER_AUTH_ENV", "production")
 
         # Session settings
-        explicit_env = "DAGSTER_AUTH_ENV" in os.environ
         self.SECRET_KEY = os.getenv("DAGSTER_AUTH_SECRET_KEY")
         if not self.SECRET_KEY:
-            if self.ENV == "production" and explicit_env:
+            if self.ENV == "production":
                 raise ValueError(
-                    "DAGSTER_AUTH_SECRET_KEY is required when DAGSTER_AUTH_ENV=production.\n"
+                    "DAGSTER_AUTH_SECRET_KEY is required in production.\n"
                     "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(32))'\n"
                     "Auto-generated keys cause session invalidation across pod restarts and "
                     "in multi-pod deployments."
@@ -101,12 +100,15 @@ class AuthConfig:
             "DAGSTER_AUTH_PROXY_LOGOUT_URL", "https://auth.company.com/logout"
         )
 
-        # Trusted proxy IPs (space/comma-separated). When set, only requests
-        # from these IPs may use proxy auth headers. Protects against header
-        # spoofing when the pod is reachable outside the proxy.
+        # Trusted proxy IPs (space/comma-separated). If empty and proxy mode
+        # is active, the boot fails unless DAGSTER_AUTH_PROXY_TRUST_ALL=true
+        # is explicitly set (opt-in to the insecure default).
         raw_ips = os.getenv("DAGSTER_AUTH_PROXY_TRUSTED_IPS", "")
         self.DAGSTER_AUTH_PROXY_TRUSTED_IPS = frozenset(
             ip.strip() for ip in raw_ips.replace(",", " ").split() if ip.strip()
+        )
+        self.DAGSTER_AUTH_PROXY_TRUST_ALL = (
+            os.getenv("DAGSTER_AUTH_PROXY_TRUST_ALL", "false").lower() == "true"
         )
 
         # RBAC: role required for GraphQL mutations not in any explicit list.
@@ -149,6 +151,16 @@ class AuthConfig:
                 f"Invalid AUTH_BACKEND: {self.AUTH_BACKEND}. "
                 f"Must be one of: {', '.join(valid_backends)}"
             )
+
+        if self.AUTH_BACKEND == "proxy":
+            if not self.DAGSTER_AUTH_PROXY_TRUSTED_IPS and not self.DAGSTER_AUTH_PROXY_TRUST_ALL:
+                raise ValueError(
+                    "DAGSTER_AUTH_BACKEND=proxy requires DAGSTER_AUTH_PROXY_TRUSTED_IPS "
+                    "to be set. Any caller that can reach this pod can spoof proxy auth "
+                    "headers and gain admin access. Set DAGSTER_AUTH_PROXY_TRUST_ALL=true "
+                    "only if you fully understand the risk (e.g. NetworkPolicy restricts "
+                    "access to the proxy only)."
+                )
 
         if self.SESSION_MAX_AGE < 60:
             raise ValueError("SESSION_MAX_AGE must be at least 60 seconds")

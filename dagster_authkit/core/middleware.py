@@ -346,7 +346,9 @@ class DagsterAuthMiddleware:
     def _is_request_from_trusted_proxy(self, request: Request) -> bool:
         trusted = config.DAGSTER_AUTH_PROXY_TRUSTED_IPS
         if not trusted:
-            return True
+            # No IPs configured -- config validation prevents this unless
+            # TRUST_ALL is explicitly set (opt-in to the insecure default).
+            return config.DAGSTER_AUTH_PROXY_TRUST_ALL
         client_ip = request.client.host if request.client else None
         if client_ip is None:
             logger.warning("Cannot determine client IP for proxy trust check")

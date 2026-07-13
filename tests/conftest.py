@@ -6,6 +6,12 @@ to keep tests DRY and maintainable.
 """
 
 import os
+
+# Must be set BEFORE dagster_authkit modules are imported, because
+# AuthConfig runs at module level and fails in production without a key.
+os.environ.setdefault("DAGSTER_AUTH_ENV", "testing")
+os.environ.setdefault("DAGSTER_AUTH_SECRET_KEY", "test-secret-key-for-pytest")
+
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -104,9 +110,9 @@ def mock_request():
 def clean_env(monkeypatch):
     """Reset relevant environment variables before each test to avoid leakage."""
     monkeypatch.setenv("DAGSTER_AUTH_ENV", "testing")
+    monkeypatch.setenv("DAGSTER_AUTH_SECRET_KEY", "test-secret-key-for-pytest")
     env_vars = [
         "DAGSTER_AUTH_BACKEND",
-        "DAGSTER_AUTH_SECRET_KEY",
         "DAGSTER_AUTH_COOKIE_NAME",
         "DAGSTER_AUTH_SESSION_MAX_AGE",
         "DAGSTER_AUTH_DB",
