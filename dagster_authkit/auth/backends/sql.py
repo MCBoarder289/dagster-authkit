@@ -47,6 +47,18 @@ class PeeweeAuthBackend(AuthBackend):
     """
 
     def __init__(self, config: Dict[str, Any]):
+        """
+        Initialise database connection, create tables, run migrations, bootstrap admin.
+
+        Args:
+            config: Dict with keys ``DAGSTER_AUTH_DATABASE_URL`` (or
+                    ``DAGSTER_AUTH_DB`` for SQLite path) and optional
+                    ``ADMIN_PASSWORD`` for first-run admin creation.
+
+        Raises:
+            peewee.DatabaseError: If the database connection fails.
+            RuntimeError: If the ``session_version`` migration fails.
+        """
         super().__init__(config)
 
         # Connection string from ENV (e.g., postgresql://user:pass@localhost:5432/db)

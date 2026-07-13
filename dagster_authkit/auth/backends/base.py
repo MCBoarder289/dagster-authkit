@@ -120,22 +120,20 @@ class RolePermissions:
         Get the minimum required role for a GraphQL mutation.
 
         Args:
-            mutation_name: Name of the GraphQL mutation
-            default_role: Role to return for unrecognized mutations.
-                          If None (default), returns None (no restriction, legacy behavior).
-                          Set to Role.ADMIN for deny-by-default.
+            mutation_name: Name of the GraphQL mutation (e.g. ``launchRun``).
+            default_role:  Role for unrecognized mutations. ``None``
+                           (legacy) means no restriction. Set to
+                           ``Role.ADMIN`` for deny-by-default.
 
         Returns:
-            Required Role (LAUNCHER/EDITOR/ADMIN) or default_role for unknown mutations
+            Required ``Role``, ``default_role`` for unknown mutations,
+            or ``None`` if no restriction.
 
-        Example:
+        Example::
+
             >>> RolePermissions.get_required_role("launchRun")
             Role.LAUNCHER
-            >>> RolePermissions.get_required_role("startSchedule")
-            Role.EDITOR
-            >>> RolePermissions.get_required_role("logTelemetry")
-            None
-            >>> RolePermissions.get_required_role("newUnknownMutation", Role.ADMIN)
+            >>> RolePermissions.get_required_role("newMutation", Role.ADMIN)
             Role.ADMIN
         """
         if mutation_name == "__UNPARSEABLE_QUERY__":
@@ -156,24 +154,21 @@ class RolePermissions:
     @classmethod
     def can_execute(cls, user_role: Role, mutation_name: str) -> bool:
         """
-        Check if a role can execute a mutation.
-
-        Respects role hierarchy (ADMIN > EDITOR > LAUNCHER > VIEWER).
+        Check if a role can execute a mutation (respects role hierarchy).
 
         Args:
-            user_role: User's role
-            mutation_name: Name of the GraphQL mutation
+            user_role:     User's role.
+            mutation_name: Name of the GraphQL mutation.
 
         Returns:
-            True if user can execute, False otherwise
+            ``True`` if the user can execute, ``False`` otherwise.
 
-        Example:
+        Example::
+
             >>> RolePermissions.can_execute(Role.LAUNCHER, "launchRun")
             True
             >>> RolePermissions.can_execute(Role.VIEWER, "launchRun")
             False
-            >>> RolePermissions.can_execute(Role.ADMIN, "startSchedule")
-            True
         """
         required_role = cls.get_required_role(mutation_name)
         if required_role is None:

@@ -44,6 +44,13 @@ class ProxyAuthBackend(AuthBackend):
     """
 
     def __init__(self, config: Dict[str, Any]):
+        """
+        Initialise proxy backend with header name mappings and group-to-role pattern.
+
+        Args:
+            config: Dict from ``AuthConfig`` containing proxy header names,
+                    group pattern, and trusted IP settings.
+        """
         super().__init__(config)
 
         # Header names (from centralized config)

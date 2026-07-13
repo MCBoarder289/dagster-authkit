@@ -30,6 +30,16 @@ class LDAPAuthBackend(AuthBackend):
     """
 
     def __init__(self, config: Dict[str, Any]):
+        """
+        Initialise LDAP connection and validation.
+
+        Args:
+            config: Dict with LDAP settings (see ``AuthConfig`` documentation
+                    for the full list of ``DAGSTER_AUTH_LDAP_*`` variables).
+
+        Raises:
+            ValueError: If required LDAP settings (SERVER, BASE_DN) are missing.
+        """
         super().__init__(config)
 
         # Validate required config
