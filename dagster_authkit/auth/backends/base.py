@@ -262,12 +262,16 @@ class AuthUser:
         """
         Convert to dict (for session storage).
 
+        Uses role.value (int) as the canonical representation for consistency
+        across all backends (SQL, LDAP, OIDC). from_dict() handles both int
+        and string formats for backward compatibility with existing sessions.
+
         Returns:
             Dict with username, role, email, full_name
         """
         return {
             "username": self.username,
-            "role": self.role.name,
+            "role": self.role.value,
             "email": self.email,
             "full_name": self.full_name,
         }

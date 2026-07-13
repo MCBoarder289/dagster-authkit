@@ -4,7 +4,7 @@ Replaces fragile regex-based approach with AST parsing to accurately identify mu
 """
 
 import logging
-from typing import Set
+from typing import Optional, Set
 
 from graphql import parse, OperationDefinitionNode, FieldNode, FragmentSpreadNode, InlineFragmentNode
 from graphql.language.ast import DocumentNode, FragmentDefinitionNode
@@ -24,21 +24,26 @@ class GraphQLMutationAnalyzer:
     """
 
     @staticmethod
-    def extract_mutation_names(query: str) -> Set[str]:
+    def extract_mutation_names(query: str, operation_name: Optional[str] = None) -> Set[str]:
         """
         Extract ALL mutation field names from a GraphQL query.
         Returns sentinel set with __UNPARSEABLE_QUERY__ if query is invalid.
         Returns empty set if query has no mutations.
 
+        If operation_name is provided, only the named operation is analyzed.
+        This prevents false-positive RBAC blocks when a document contains
+        both query and mutation operations but only the query is executed.
+
         Examples:
             >>> extract_mutation_names("mutation { launchRun deleteRun }")
             {'launchRun', 'deleteRun'}
-            >>> extract_mutation_names("")
+            >>> extract_mutation_names("query GetRuns { ... } mutation DoStuff { launchRun }",
+            ...                        operation_name="GetRuns")
             set()
         """
         try:
             ast = parse(query)
-            return GraphQLMutationAnalyzer._find_mutations_in_ast(ast)
+            return GraphQLMutationAnalyzer._find_mutations_in_ast(ast, operation_name)
         except Exception as e:
             logger.warning(f"Failed to parse GraphQL query: {e}")
             return {_SENTINEL_UNPARSEABLE}
@@ -60,7 +65,9 @@ class GraphQLMutationAnalyzer:
             return False
 
     @staticmethod
-    def _find_mutations_in_ast(ast: DocumentNode) -> Set[str]:
+    def _find_mutations_in_ast(
+        ast: DocumentNode, operation_name: Optional[str] = None
+    ) -> Set[str]:
         """Walk AST and collect all mutation field names, traversing fragments."""
         mutations = set()
         fragment_definitions = {}
@@ -72,6 +79,16 @@ class GraphQLMutationAnalyzer:
 
         for definition in ast.definitions:
             if not isinstance(definition, OperationDefinitionNode):
+                continue
+
+            # If operation_name is specified, skip operations that don't match
+            op_name = definition.name.value if definition.name else None
+            if operation_name is not None and op_name != operation_name:
+                continue
+
+            # Anonymous operations: if operation_name is set and this operation
+            # has no name, it can't be the targeted one — skip it.
+            if operation_name is not None and op_name is None:
                 continue
 
             if definition.operation.value != "mutation":

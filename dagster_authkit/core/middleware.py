@@ -183,6 +183,7 @@ class DagsterAuthMiddleware:
 
             for g_item in queries:
                 query_str = g_item.get("query", "")
+                operation_name = g_item.get("operationName") or None
 
                 if not GraphQLMutationAnalyzer.is_parseable(query_str):
                     logger.warning(f"Rejected unparseable GraphQL query from {user.username}")
@@ -194,7 +195,9 @@ class DagsterAuthMiddleware:
                     await response(scope, receive, send)
                     return
 
-                mutation_names = GraphQLMutationAnalyzer.extract_mutation_names(query_str)
+                mutation_names = GraphQLMutationAnalyzer.extract_mutation_names(
+                    query_str, operation_name=operation_name
+                )
 
                 if not mutation_names:
                     continue

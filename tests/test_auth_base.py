@@ -200,7 +200,7 @@ class TestAuthUser:
         assert user.display_name == "john"
 
     def test_to_dict(self):
-        """to_dict should serialize all fields correctly."""
+        """to_dict should serialize role as int for cross-backend consistency."""
         user = AuthUser(
             username="admin",
             role=Role.ADMIN,
@@ -210,7 +210,7 @@ class TestAuthUser:
         result = user.to_dict()
         assert result == {
             "username": "admin",
-            "role": "ADMIN",
+            "role": 40,
             "email": "admin@test.com",
             "full_name": "Admin",
         }

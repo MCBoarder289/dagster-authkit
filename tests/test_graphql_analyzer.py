@@ -47,6 +47,28 @@ class TestExtractMutationNames:
         assert mutations == {"launchRun"}
         assert "someNestedField" not in mutations
 
+    def test_operation_name_filters_query(self):
+        """When operationName targets a query, mutations from other ops are ignored."""
+        query = """
+        query GetRuns { runs { runId } }
+        mutation DeleteAll { deleteRun(runId: "x") }
+        """
+        mutations = GraphQLMutationAnalyzer.extract_mutation_names(
+            query, operation_name="GetRuns"
+        )
+        assert mutations == set()
+
+    def test_operation_name_filters_mutation(self):
+        """When operationName targets a mutation, only that mutation's fields are checked."""
+        query = """
+        query GetRuns { runs { runId } }
+        mutation DeleteAll { deleteRun(runId: "x") }
+        """
+        mutations = GraphQLMutationAnalyzer.extract_mutation_names(
+            query, operation_name="DeleteAll"
+        )
+        assert mutations == {"deleteRun"}
+
     def test_named_mutation(self):
         """Named (aliased) mutations should still have their fields extracted."""
         mutations = GraphQLMutationAnalyzer.extract_mutation_names(
