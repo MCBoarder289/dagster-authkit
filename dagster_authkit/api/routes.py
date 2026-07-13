@@ -99,12 +99,17 @@ async def process_login(request: Request) -> Response:
         )
 
     client_ip = _get_client_ip(request)
+    ip_identifier = f"ip:{client_ip}"
 
-    # 1. Rate Limiting Check
-    is_limited, attempts = is_rate_limited(username)
-    if is_limited:
-        log_login_attempt(username, False, client_ip, f"RATE_LIMIT ({attempts} attempts)")
-        log_rate_limit_violation(username, client_ip, attempts)
+    # 1. Rate Limiting Check (username + IP, independent limits)
+    # Username prevents brute-force on a single account.
+    # IP prevents credential spraying across many accounts.
+    user_limited, user_attempts = is_rate_limited(username)
+    ip_limited, ip_attempts = is_rate_limited(ip_identifier)
+    if user_limited or ip_limited:
+        total = max(user_attempts, ip_attempts)
+        log_login_attempt(username, False, client_ip, f"RATE_LIMIT ({total} attempts)")
+        log_rate_limit_violation(username, client_ip, total)
         return RedirectResponse(
             url=f"/auth/login?next={next_url}&error=Too+many+attempts.", status_code=302
         )
@@ -124,6 +129,7 @@ async def process_login(request: Request) -> Response:
     # 3. Validation
     if not user:
         record_login_attempt(username)
+        record_login_attempt(ip_identifier)
         log_login_attempt(username, False, client_ip, "INVALID_CREDENTIALS")
         return RedirectResponse(
             url=f"/auth/login?next={next_url}&error=Invalid+credentials.", status_code=302
@@ -131,6 +137,7 @@ async def process_login(request: Request) -> Response:
 
     # 4. Success & Session Creation
     reset_rate_limit(username)
+    reset_rate_limit(ip_identifier)
     log_login_attempt(username, True, client_ip)
 
     session_token = sessions.create(user.to_dict())

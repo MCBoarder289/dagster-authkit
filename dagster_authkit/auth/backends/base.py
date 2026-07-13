@@ -138,6 +138,13 @@ class RolePermissions:
             >>> RolePermissions.get_required_role("newUnknownMutation", Role.ADMIN)
             Role.ADMIN
         """
+        if mutation_name == "__UNPARSEABLE_QUERY__":
+            # Safety net: if extract_mutation_names is called without is_parseable()
+            # check first, the sentinel must fail-closed (require ADMIN).
+            if default_role is not None:
+                return default_role
+            return Role.ADMIN
+
         if mutation_name in cls.LAUNCHER_MUTATIONS:
             return Role.LAUNCHER
         elif mutation_name in cls.EDITOR_MUTATIONS:

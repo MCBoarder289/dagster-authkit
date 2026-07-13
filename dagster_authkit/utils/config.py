@@ -15,7 +15,21 @@ class AuthConfig:
         self.ENV = os.getenv("DAGSTER_AUTH_ENV", "production")
 
         # Session settings
-        self.SECRET_KEY = os.getenv("DAGSTER_AUTH_SECRET_KEY") or self._generate_secret_key()
+        explicit_env = "DAGSTER_AUTH_ENV" in os.environ
+        self.SECRET_KEY = os.getenv("DAGSTER_AUTH_SECRET_KEY")
+        if not self.SECRET_KEY:
+            if self.ENV == "production" and explicit_env:
+                raise ValueError(
+                    "DAGSTER_AUTH_SECRET_KEY is required when DAGSTER_AUTH_ENV=production.\n"
+                    "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(32))'\n"
+                    "Auto-generated keys cause session invalidation across pod restarts and "
+                    "in multi-pod deployments."
+                )
+            self.SECRET_KEY = secrets.token_urlsafe(32)
+            print(
+                f"WARNING: Using auto-generated SECRET_KEY. Set DAGSTER_AUTH_SECRET_KEY!\n"
+                f"  Suggested value: {self.SECRET_KEY}"
+            )
         self.SESSION_COOKIE_NAME = os.getenv("DAGSTER_AUTH_COOKIE_NAME", "dagster_session")
         self.SESSION_MAX_AGE = int(os.getenv("DAGSTER_AUTH_SESSION_MAX_AGE", "86400"))  # 24h
         self.SESSION_COOKIE_SECURE = (
@@ -126,14 +140,6 @@ class AuthConfig:
 
         # Validate critical settings
         self._validate()
-
-    @staticmethod
-    def _generate_secret_key() -> str:
-        """Generate a secure random secret key if not provided."""
-        key = secrets.token_urlsafe(32)
-        print(f"⚠️  WARNING: Using auto-generated secret key. Set DAGSTER_AUTH_SECRET_KEY!")
-        print(f"    Suggested value: {key}")
-        return key
 
     def _validate(self):
         """Validate configuration settings with support for the new SQL backend."""

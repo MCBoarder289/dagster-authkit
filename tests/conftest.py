@@ -103,6 +103,7 @@ def mock_request():
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     """Reset relevant environment variables before each test to avoid leakage."""
+    monkeypatch.setenv("DAGSTER_AUTH_ENV", "testing")
     env_vars = [
         "DAGSTER_AUTH_BACKEND",
         "DAGSTER_AUTH_SECRET_KEY",
