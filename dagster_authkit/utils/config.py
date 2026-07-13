@@ -106,6 +106,17 @@ class AuthConfig:
             )
         self.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE = raw_unknown_role
 
+        # RBAC: minimum role for non-GraphQL REST write requests (POST/PUT/DELETE/PATCH).
+        # Default: EDITOR. REST writes are typically administrative operations
+        # (user management, config changes). GraphQL mutations have per-operation RBAC.
+        raw_rest_role = os.getenv("DAGSTER_AUTH_REST_WRITE_ROLE", "EDITOR").upper()
+        if raw_rest_role not in valid_roles:
+            raise ValueError(
+                f"Invalid DAGSTER_AUTH_REST_WRITE_ROLE: {raw_rest_role}. "
+                f"Must be one of: {', '.join(sorted(valid_roles))}"
+            )
+        self.DAGSTER_AUTH_REST_WRITE_ROLE = raw_rest_role
+
         # Admin Bootstrap (Used by SQL Backend)
         self.ADMIN_PASSWORD = os.getenv("DAGSTER_AUTH_ADMIN_PASSWORD", "")
 

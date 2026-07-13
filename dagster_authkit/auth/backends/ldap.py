@@ -210,17 +210,18 @@ class LDAPAuthBackend(AuthBackend):
 
     def _find_user_dn(self, username: str) -> Optional[str]:
         """Search for user DN using service account and tuple unpacking."""
-        try:
-            from ldap3 import Connection, SAFE_SYNC, SUBTREE
-            from ldap3.utils.conv import escape_filter_chars
+        from ldap3 import Connection, SAFE_SYNC, SUBTREE
+        from ldap3.utils.conv import escape_filter_chars
 
-            #
+        conn = None
+        try:
             conn = Connection(
                 self.server,
                 user=self.bind_dn,
                 password=self.bind_password,
                 client_strategy=SAFE_SYNC,
                 auto_bind=True,
+                receive_timeout=self._get_timeout(),
             )
 
             status, _, response, _ = conn.search(
@@ -232,16 +233,16 @@ class LDAPAuthBackend(AuthBackend):
             )
 
             if status and response:
-                dn = response[0]["dn"]
-                conn.unbind()
-                return dn
+                return response[0]["dn"]
 
-            conn.unbind()
             logger.warning(f"LDAP: User '{username}' not found under base DN.")
             return None
         except Exception as e:
             logger.error(f"LDAP: Error searching DN for '{username}': {e}")
             return None
+        finally:
+            if conn is not None:
+                conn.unbind()
 
     def _get_user_attributes(self, user_dn: str, existing_conn=None) -> Dict[str, List[str]]:
         """Fetch attributes using raw response from SAFE_SYNC tuple.

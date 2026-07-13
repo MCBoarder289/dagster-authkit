@@ -69,6 +69,11 @@ class DagsterAuthMiddleware:
 
         self._unknown_mutation_role = Role[config.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE]
 
+        # Minimum role for non-GraphQL write requests (POST/PUT/DELETE/PATCH).
+        # Defaults to EDITOR since REST writes are typically administrative.
+        # GraphQL mutations use their own per-mutation RBAC via RolePermissions.
+        self._rest_write_role = Role[getattr(config, "DAGSTER_AUTH_REST_WRITE_ROLE", "EDITOR")]
+
     # ================================================================
     # ASGI entry point
     # ================================================================
@@ -216,9 +221,14 @@ class DagsterAuthMiddleware:
             scope = dict(scope)
             request = Request(scope, _receive)
 
-        elif method in self.WRITE_METHODS and not user.can(Role.EDITOR):
-            self._log_denied(user, f"REST_{method}_{path}", Role.EDITOR)
-            response = self._forbidden_html_response(user, path, method, "REQUIRES_EDITOR")
+        elif method in self.WRITE_METHODS and not user.can(self._rest_write_role):
+            self._log_denied(
+                user, f"REST {method} {path}", self._rest_write_role,
+                method=method, path=path,
+            )
+            response = self._forbidden_html_response(
+                user, path, method, f"REQUIRES_{self._rest_write_role.name}"
+            )
             await response(scope, receive, send)
             return
 
@@ -347,10 +357,10 @@ class DagsterAuthMiddleware:
         return is_trusted
 
     @staticmethod
-    def _log_denied(user, action, role):
+    def _log_denied(user, action, role, method="POST", path="/graphql"):
         logger.warning(f"RBAC DENIED: {user.username} (role: {user.role.name}) tried {action}")
         log_access_control(
-            user.username, "POST", "/graphql", False, [user.role.name], f"REQUIRES_{role.name}"
+            user.username, method, path, False, [user.role.name], f"REQUIRES_{role.name}"
         )
 
     @staticmethod

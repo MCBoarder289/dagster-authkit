@@ -150,16 +150,12 @@ def get_health_status() -> Dict[str, Any]:
         health["status"] = "degraded"
         health["checks"]["backend"] = {"status": "error", "error": str(e)}
 
-    # Check 2: Database (if SQLite)
-    if config.AUTH_BACKEND == "sqlite":
+    # Check 2: Database (SQL backends)
+    if config.AUTH_BACKEND in ("sql", "sqlite"):
         try:
-            import sqlite3
-
-            db_path = config.__dict__.get("DAGSTER_AUTH_DB", "./dagster_auth.db")
-            conn = sqlite3.connect(db_path, timeout=5.0)
-            conn.execute("SELECT 1")
-            conn.close()
-            health["checks"]["database"] = {"status": "ok"}
+            # Use the cached backend instance rather than opening a raw connection
+            backend = get_backend(config.AUTH_BACKEND, config.__dict__)
+            health["checks"]["database"] = {"status": "ok", "engine": type(backend.db).__name__}
         except Exception as e:
             health["status"] = "unhealthy"
             health["checks"]["database"] = {"status": "error", "error": str(e)}
