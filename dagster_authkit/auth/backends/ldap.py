@@ -94,6 +94,32 @@ class LDAPAuthBackend(AuthBackend):
     def get_name(self) -> str:
         return "ldap"
 
+    def _get_timeout(self) -> int:
+        """Get the LDAP connection timeout from config, defaulting to 10 seconds."""
+        try:
+            return int(self.config.get("DAGSTER_AUTH_LDAP_TIMEOUT", 10))
+        except (ValueError, TypeError):
+            return 10
+
+    def _build_auth_user(self, username: str, role: Role, attrs: Dict[str, List[str]]) -> AuthUser:
+        """Build an AuthUser from LDAP attributes (shared between authenticate and get_user)."""
+        display_name = attrs.get("displayName", "")
+        cn = attrs.get("cn", [])
+
+        if isinstance(display_name, list):
+            display_name = display_name[0] if display_name else ""
+
+        cn_value = cn[0] if cn else ""
+
+        full_name = display_name or cn_value or username
+
+        return AuthUser(
+            username=username,
+            role=role,
+            email=attrs.get("mail", [""])[0] if attrs.get("mail") else "",
+            full_name=full_name,
+        )
+
     # ========================================
     # Core Authentication
     # ========================================
@@ -102,6 +128,10 @@ class LDAPAuthBackend(AuthBackend):
         """
         Authenticates user against LDAP.
         """
+        if not password:
+            logger.warning(f"LDAP: Empty password rejected for '{username}'")
+            return None
+
         try:
             from ldap3 import Connection, SAFE_SYNC
 
@@ -118,41 +148,27 @@ class LDAPAuthBackend(AuthBackend):
                 client_strategy=SAFE_SYNC,
                 auto_bind=False,
                 raise_exceptions=False,
+                receive_timeout=self._get_timeout(),
             )
 
-            status, result, _, _ = conn.bind()
+            try:
+                status, result, _, _ = conn.bind()
 
-            if not status:
-                logger.warning(
-                    f"LDAP: Authentication failed for '{username}': {result.get('description')}"
-                )
-                return None
+                if not status:
+                    logger.warning(
+                        f"LDAP: Authentication failed for '{username}': {result.get('description')}"
+                    )
+                    return None
 
-            logger.info(f"LDAP: User '{username}' bound successfully")
+                logger.info(f"LDAP: User '{username}' bound successfully")
 
-            # Step 3 & 4: Attributes and Role
-            attrs = self._get_user_attributes(user_dn, conn)
-            role = self._determine_role(user_dn, attrs, conn=conn)
+                # Step 3 & 4: Attributes and Role
+                attrs = self._get_user_attributes(user_dn, conn)
+                role = self._determine_role(user_dn, attrs, conn=conn)
 
-            conn.unbind()
-
-            displayName = attrs.get("displayName", "")
-            cn = attrs.get("cn", [])
-
-            # displayName pode ser string ou lista
-            if isinstance(displayName, list):
-                displayName = displayName[0] if displayName else ""
-
-            cn_value = cn[0] if cn else ""
-
-            full_name = displayName or cn_value or username
-
-            return AuthUser(
-                username=username,
-                role=role,
-                email=attrs.get("mail", [""])[0] if attrs.get("mail") else "",
-                full_name=full_name,
-            )
+                return self._build_auth_user(username, role, attrs)
+            finally:
+                conn.unbind()
 
         except Exception as e:
             logger.error(f"LDAP: Auth error for '{username}': {e}")
@@ -173,29 +189,17 @@ class LDAPAuthBackend(AuthBackend):
                 password=self.bind_password,
                 client_strategy=SAFE_SYNC,
                 auto_bind=True,
+                receive_timeout=self._get_timeout(),
             )
 
-            attrs = self._get_user_attributes(user_dn, conn)
-            role = self._determine_role(user_dn, attrs, conn=conn)
+            try:
+                attrs = self._get_user_attributes(user_dn, conn)
+                role = self._determine_role(user_dn, attrs, conn=conn)
 
-            conn.unbind()
+                return self._build_auth_user(username, role, attrs)
+            finally:
+                conn.unbind()
 
-            displayName = attrs.get("displayName", "")
-            cn = attrs.get("cn", [])
-
-            if isinstance(displayName, list):
-                displayName = displayName[0] if displayName else ""
-
-            cn_value = cn[0] if cn else ""
-
-            full_name = displayName or cn_value or username
-
-            return AuthUser(
-                username=username,
-                role=role,
-                email=attrs.get("mail", [""])[0] if attrs.get("mail") else "",
-                full_name=full_name,
-            )
         except Exception as e:
             logger.error(f"LDAP: get_user error for '{username}': {e}")
             return None
@@ -240,16 +244,20 @@ class LDAPAuthBackend(AuthBackend):
             return None
 
     def _get_user_attributes(self, user_dn: str, existing_conn=None) -> Dict[str, List[str]]:
-        """Fetch attributes using raw response from SAFE_SYNC tuple."""
+        """Fetch attributes using raw response from SAFE_SYNC tuple.
+        If existing_conn is provided, the caller is responsible for cleanup.
+        Otherwise, a new connection is created and properly cleaned up."""
         try:
             from ldap3 import Connection, SAFE_SYNC
 
+            owns_connection = existing_conn is None
             conn = existing_conn or Connection(
                 self.server,
                 user=self.bind_dn,
                 password=self.bind_password,
                 client_strategy=SAFE_SYNC,
                 auto_bind=True,
+                receive_timeout=self._get_timeout(),
             )
 
             attrs_to_fetch = ["cn", "displayName", "mail", "memberOf"]
@@ -266,7 +274,7 @@ class LDAPAuthBackend(AuthBackend):
             if status and response:
                 attrs = response[0].get("attributes", {})
 
-                # ✅ DEBUG: Ver o que veio do LDAP
+                # DEBUG: Show LDAP attributes
                 logger.info(f"🔍 LDAP Attributes for {user_dn}:")
                 logger.info(f"  Raw attrs: {attrs}")
                 logger.info(f"  displayName: {attrs.get('displayName')}")

@@ -4,7 +4,7 @@ Implements identity management with support for SQLite, PostgreSQL, and MySQL.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from peewee import Model, CharField, IntegerField, BooleanField, DateTimeField, DoesNotExist
@@ -30,7 +30,7 @@ class UserTable(Model):
     email = CharField(max_length=255, null=True)
     full_name = CharField(max_length=255, null=True)
     is_active = BooleanField(default=True)
-    created_at = DateTimeField(default=datetime.utcnow)
+    created_at = DateTimeField(default=lambda: datetime.now(timezone.utc))
     last_login = DateTimeField(null=True)
 
     class Meta:
@@ -75,6 +75,9 @@ class PeeweeAuthBackend(AuthBackend):
 
     def authenticate(self, username: str, password: str) -> Optional[AuthUser]:
         """Validates credentials and returns a universal AuthUser."""
+        if not password:
+            return None
+
         try:
             user_obj = UserTable.get(
                 (UserTable.username == username) & (UserTable.is_active == True)
@@ -82,7 +85,7 @@ class PeeweeAuthBackend(AuthBackend):
 
             if SecurityHardening.verify_password(password, user_obj.password_hash):
                 # Update last login timestamp
-                user_obj.last_login = datetime.utcnow()
+                user_obj.last_login = datetime.now(timezone.utc)
                 user_obj.save()
 
                 return AuthUser.from_dict(
@@ -128,6 +131,7 @@ class PeeweeAuthBackend(AuthBackend):
         **kwargs,
     ) -> bool:
         """Creates a new user and logs the event to stdout."""
+        username = SecurityHardening.sanitize_username(username)
         try:
             UserTable.create(
                 username=username,
@@ -164,7 +168,7 @@ class PeeweeAuthBackend(AuthBackend):
         )
 
         if query.execute() > 0:
-            # O "Doom" aqui é só no CPF do cara, não na firma toda.
+            # Only revoke sessions for this specific user, not globally
             from dagster_authkit.auth.session import sessions
 
             sessions.revoke_all(username)

@@ -65,8 +65,8 @@ class SecurityHardening:
         if not url:
             return False
 
-        # Accept relative URLs (start with /)
-        if url.startswith("/") and "://" not in url:
+        # Accept relative URLs (start with / but NOT // which is protocol-relative)
+        if url.startswith("/") and not url.startswith("//") and "://" not in url:
             return True
 
         # Parse absolute URL

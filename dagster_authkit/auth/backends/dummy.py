@@ -80,6 +80,9 @@ class DummyAuthBackend(AuthBackend):
         Returns:
             AuthUser if authenticated, None if failed
         """
+        if not password:
+            return None
+
         user = self.USERS.get(username)
 
         if not user:

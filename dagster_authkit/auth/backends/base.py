@@ -115,15 +115,18 @@ class RolePermissions:
     )
 
     @classmethod
-    def get_required_role(cls, mutation_name: str) -> Optional[Role]:
+    def get_required_role(cls, mutation_name: str, default_role: Optional[Role] = None) -> Optional[Role]:
         """
         Get the minimum required role for a GraphQL mutation.
 
         Args:
             mutation_name: Name of the GraphQL mutation
+            default_role: Role to return for unrecognized mutations.
+                          If None (default), returns None (no restriction, legacy behavior).
+                          Set to Role.ADMIN for deny-by-default.
 
         Returns:
-            Required Role (LAUNCHER/EDITOR/ADMIN) or None if no restriction
+            Required Role (LAUNCHER/EDITOR/ADMIN) or default_role for unknown mutations
 
         Example:
             >>> RolePermissions.get_required_role("launchRun")
@@ -132,6 +135,8 @@ class RolePermissions:
             Role.EDITOR
             >>> RolePermissions.get_required_role("logTelemetry")
             None
+            >>> RolePermissions.get_required_role("newUnknownMutation", Role.ADMIN)
+            Role.ADMIN
         """
         if mutation_name in cls.LAUNCHER_MUTATIONS:
             return Role.LAUNCHER
@@ -139,7 +144,7 @@ class RolePermissions:
             return Role.EDITOR
         elif mutation_name in cls.ADMIN_MUTATIONS:
             return Role.ADMIN
-        return None  # No restriction (e.g., logTelemetry, setNuxSeen)
+        return default_role  # No restriction if no default_role configured
 
     @classmethod
     def can_execute(cls, user_role: Role, mutation_name: str) -> bool:
