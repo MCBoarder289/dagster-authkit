@@ -3,9 +3,14 @@ HTML Templates - Centralized UI Components
 All HTML/CSS/JS strings for AuthKit interface.
 """
 
+import html
 
-def render_login_page(next_url: str = "/", error: str = "") -> str:
-    html = f"""
+
+def render_login_page(next_url: str = "/", error: str = "", csrf_token: str = "") -> str:
+    safe_next = html.escape(next_url, quote=True)
+    safe_error = html.escape(error, quote=True)
+    safe_csrf = html.escape(csrf_token, quote=True)
+    html_str = f"""
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -175,10 +180,11 @@ def render_login_page(next_url: str = "/", error: str = "") -> str:
                         <p class="subtitle">Please sign in to continue</p>
                     </div>
 
-                    {"<div class='error-message'>" + error + "</div>" if error else ""}
+                    {"<div class='error-message'>" + safe_error + "</div>" if error else ""}
 
                     <form method="post" action="/auth/process">
-                        <input type="hidden" name="next" value="{next_url}">
+                        <input type="hidden" name="csrf_token" value="{safe_csrf}">
+                        <input type="hidden" name="next" value="{safe_next}">
 
                         <div class="form-group">
                             <label for="username">Username</label>
@@ -200,10 +206,15 @@ def render_login_page(next_url: str = "/", error: str = "") -> str:
             </body>
             </html>
             """
-    return html
+    return html_str
 
 
 def render_403_page(user, path: str, method: str, reason: str) -> str:
+    safe_username = html.escape(user.username, quote=True)
+    safe_role = html.escape(user.role.name, quote=True)
+    safe_method = html.escape(method, quote=True)
+    safe_path = html.escape(path, quote=True)
+    safe_reason = html.escape(reason, quote=True)
     html = f"""
             <!DOCTYPE html>
             <html>
@@ -238,10 +249,10 @@ def render_403_page(user, path: str, method: str, reason: str) -> str:
                 <div class="container">
                     <h1>🔒 403 Forbidden</h1>
                     <p class="info">
-                        User <strong>{user.username}</strong> (role: <strong>{user.role.name}</strong>)
-                        cannot <strong>{method}</strong> on <strong>{path}</strong>.
+                        User <strong>{safe_username}</strong> (role: <strong>{safe_role}</strong>)
+                        cannot <strong>{safe_method}</strong> on <strong>{safe_path}</strong>.
                     </p>
-                    <p class="detail">Reason: {reason}</p>
+                    <p class="detail">Reason: {safe_reason}</p>
                     <a href="/">← Return to Dashboard</a>
                 </div>
             </body>

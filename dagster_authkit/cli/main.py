@@ -11,7 +11,7 @@ Main orchestrator that:
 import sys
 import logging
 from dagster_authkit.core.detection_layer import verify_dagster_api_compatibility
-from dagster_authkit.core.patch import apply_patches
+from dagster_authkit.core.patch import apply_patches, verify_patches
 from dagster_authkit.utils.config import config
 from dagster_authkit.utils.display import print_banner, print_config_summary
 from dagster_authkit.utils.logging import setup_logging
@@ -69,6 +69,9 @@ def main():
     logger.info("Applying authentication patches...")
     try:
         apply_patches()
+        if not verify_patches():
+            logger.critical("Patch verification failed — patches were not applied correctly.")
+            sys.exit(1)
     except Exception as e:
         logger.critical(f"Fatal error during patching: {e}")
         sys.exit(1)

@@ -6,6 +6,8 @@ Matched with the finalized Peewee SQL Backend and stdout Audit Logging.
 """
 
 import logging
+import time
+from threading import Lock
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -30,6 +32,37 @@ from dagster_authkit.utils.templates import render_login_page
 
 logger = logging.getLogger(__name__)
 
+# In-memory CSRF token store with TTL-based expiry
+_csrf_tokens: dict[str, float] = {}
+_csrf_lock = Lock()
+_CSRF_TOKEN_TTL = 3600  # 1 hour
+
+
+def _store_csrf_token(token: str) -> None:
+    """Store a CSRF token with current timestamp for TTL checking."""
+    with _csrf_lock:
+        _csrf_tokens[token] = time.time()
+
+
+def _validate_and_consume_csrf_token(token: str) -> bool:
+    """Validate a CSRF token and consume it (one-time use)."""
+    with _csrf_lock:
+        created = _csrf_tokens.pop(token, None)
+        if created is None:
+            return False
+        if time.time() - created > _CSRF_TOKEN_TTL:
+            return False
+        return True
+
+
+def _prune_expired_csrf_tokens() -> None:
+    """Remove expired CSRF tokens to prevent memory leak."""
+    now = time.time()
+    with _csrf_lock:
+        expired = [t for t, ts in _csrf_tokens.items() if now - ts > _CSRF_TOKEN_TTL]
+        for t in expired:
+            del _csrf_tokens[t]
+
 
 def _get_client_ip(request: Request) -> str:
     """Helper to get real IP behind K8s Ingress (X-Forwarded-For)."""
@@ -46,7 +79,13 @@ async def login_page(request: Request) -> Response:
         next_url = "/"
 
     error = request.query_params.get("error", "")
-    html = render_login_page(next_url, error)
+
+    # Generate CSRF token and store it
+    csrf_token = SecurityHardening.generate_csrf_token()
+    _store_csrf_token(csrf_token)
+    _prune_expired_csrf_tokens()
+
+    html = render_login_page(next_url, error, csrf_token)
 
     return HTMLResponse(content=html)
 
@@ -60,6 +99,14 @@ async def process_login(request: Request) -> Response:
 
     if not SecurityHardening.validate_redirect_url(next_url):
         next_url = "/"
+
+    # CSRF validation
+    csrf_token = str(form.get("csrf_token", ""))
+    if not _validate_and_consume_csrf_token(csrf_token):
+        logger.warning(f"CSRF validation failed for login attempt")
+        return RedirectResponse(
+            url=f"/auth/login?next={next_url}&error=Invalid+request.", status_code=302
+        )
 
     client_ip = _get_client_ip(request)
 
