@@ -51,14 +51,23 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
 
         if self.is_proxy_mode:
             self.proxy_backend = get_backend("proxy", config.__dict__)
-            logger.info("🔒 Middleware: PROXY MODE enabled (Authelia forward auth)")
+            logger.info("Middleware: PROXY MODE enabled (Authelia forward auth)")
         else:
             self.proxy_backend = None
-            logger.info(f"🔒 Middleware: SESSION MODE (backend={config.AUTH_BACKEND})")
+            logger.info(f"Middleware: SESSION MODE (backend={config.AUTH_BACKEND})")
+
+        # Resolve default role for unknown GraphQL mutations (deny-by-default)
+        self._unknown_mutation_role = Role[config.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE]
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         method = request.method
+
+        # Let CORS preflight requests pass through unauthenticated.
+        # The Dagster CORS middleware runs below us and needs to respond
+        # to OPTIONS requests before any auth check is performed.
+        if method == "OPTIONS":
+            return await call_next(request)
 
         if path == "/auth/health":
             return await health_endpoint(request)
@@ -78,6 +87,11 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
 
         # PROXY or SESSION
         if self.is_proxy_mode:
+            if not self._is_request_from_trusted_proxy(request):
+                return Response(
+                    content="Unauthorized: Request did not come from a trusted proxy",
+                    status_code=403,
+                )
             user = self._get_user_from_proxy(request)
             if not user:
                 return Response(
@@ -103,13 +117,25 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
 
             for g_item in queries:
                 query_str = g_item.get("query", "")
+
+                if not GraphQLMutationAnalyzer.is_parseable(query_str):
+                    logger.warning(f"Rejected unparseable GraphQL query from {user.username}")
+                    return Response(
+                        content='{"errors":[{"message":"Invalid GraphQL query"}]}',
+                        status_code=400,
+                        media_type="application/json",
+                    )
+
                 mutation_names = GraphQLMutationAnalyzer.extract_mutation_names(query_str)
 
                 if not mutation_names:
                     continue
 
                 for mutation_name in mutation_names:
-                    required_role = RolePermissions.get_required_role(mutation_name)
+                    required_role = RolePermissions.get_required_role(
+                        mutation_name,
+                        default_role=self._unknown_mutation_role,
+                    )
 
                     if required_role and not user.can(required_role):
                         self._log_denied(user, mutation_name, required_role)
@@ -160,6 +186,30 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
         return user
 
     # Helper Methods
+    def _is_request_from_trusted_proxy(self, request: Request) -> bool:
+        """Check if the request originates from a trusted proxy IP.
+
+        When DAGSTER_AUTH_PROXY_TRUSTED_IPS is empty, all IPs are trusted
+        (backward compatible). When set, only connections from those IPs
+        are allowed to use proxy auth headers.
+        """
+        trusted = config.DAGSTER_AUTH_PROXY_TRUSTED_IPS
+        if not trusted:
+            return True
+
+        client_ip = request.client.host if request.client else None
+        if client_ip is None:
+            logger.warning("Cannot determine client IP for proxy trust check")
+            return False
+
+        is_trusted = client_ip in trusted
+        if not is_trusted:
+            logger.warning(
+                f"Rejected proxy auth from untrusted IP: {client_ip} "
+                f"(trusted: {sorted(trusted)})"
+            )
+        return is_trusted
+
     def _get_authenticated_user(self, request: Request) -> Optional[AuthUser]:
         token = request.cookies.get(config.SESSION_COOKIE_NAME)
         if not token:
@@ -190,7 +240,7 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
     def _parse_json(body: bytes) -> dict:
         try:
             return json.loads(body.decode("utf-8"))
-        except:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return {}
 
     @staticmethod
