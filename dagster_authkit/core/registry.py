@@ -23,6 +23,7 @@ class BackendRegistry:
     """
 
     _backends: Dict[str, Type[AuthBackend]] = {}
+    _instances: Dict[str, AuthBackend] = {}
     _initialized: bool = False
 
     @classmethod
@@ -101,19 +102,24 @@ class BackendRegistry:
         if name not in cls._backends:
             available = ", ".join(cls._backends.keys()) if cls._backends else "none"
             raise ValueError(
-                f"❌ Unknown backend: '{name}'. "
+                f"Unknown backend: '{name}'. "
                 f"Available backends: {available}. "
                 f"Check pyproject.toml [project.entry-points] configuration."
             )
+
+        # Return cached instance if available (avoids reconnect + create_tables per request)
+        if name in cls._instances:
+            return cls._instances[name]
 
         backend_class = cls._backends[name]
 
         try:
             backend = backend_class(config)
-            logger.info(f"✅ Initialized backend: {name} ({backend.get_name()})")
+            cls._instances[name] = backend
+            logger.info(f"Initialized backend: {name} ({backend.get_name()})")
             return backend
         except Exception as e:
-            logger.error(f"❌ Failed to initialize backend '{name}': {e}", exc_info=True)
+            logger.error(f"Failed to initialize backend '{name}': {e}", exc_info=True)
             raise RuntimeError(f"Backend initialization failed: {e}") from e
 
     @classmethod
@@ -139,12 +145,13 @@ class BackendRegistry:
         """
         Resets registry (useful for tests).
 
-        Clears all discovered backends and forces re-discovery
-        on next call.
+        Clears all discovered backends and cached instances,
+        forcing re-discovery on next call.
         """
         cls._backends.clear()
+        cls._instances.clear()
         cls._initialized = False
-        logger.debug("🔄 Backend registry reset")
+        logger.debug("Backend registry reset")
 
 
 # ========================================
