@@ -232,7 +232,7 @@ class SecurityHardening:
             bool: True if password is correct
         """
         try:
-            if password_hash.startswith("$2b$"):
+            if password_hash.startswith(("$2a$", "$2b$", "$2y$")):
                 # BCrypt hash (with SHA-256 pre-hash)
                 import bcrypt
 

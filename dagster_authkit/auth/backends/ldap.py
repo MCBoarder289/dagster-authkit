@@ -103,20 +103,20 @@ class LDAPAuthBackend(AuthBackend):
 
     def _build_auth_user(self, username: str, role: Role, attrs: Dict[str, List[str]]) -> AuthUser:
         """Build an AuthUser from LDAP attributes (shared between authenticate and get_user)."""
-        display_name = attrs.get("displayName", "")
-        cn = attrs.get("cn", [])
+        def _first(attr_name: str) -> str:
+            val = attrs.get(attr_name, "")
+            if isinstance(val, list):
+                return val[0] if val else ""
+            return str(val) if val else ""
 
-        if isinstance(display_name, list):
-            display_name = display_name[0] if display_name else ""
-
-        cn_value = cn[0] if cn else ""
-
+        display_name = _first("displayName")
+        cn_value = _first("cn")
         full_name = display_name or cn_value or username
 
         return AuthUser(
             username=username,
             role=role,
-            email=attrs.get("mail", [""])[0] if attrs.get("mail") else "",
+            email=_first("mail"),
             full_name=full_name,
         )
 
