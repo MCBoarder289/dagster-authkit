@@ -155,6 +155,26 @@ class SecurityHardening:
         return response
 
     @staticmethod
+    def get_security_headers() -> dict:
+        """Returns security headers as a plain dict for ASGI send wrappers."""
+        return {
+            "X-Frame-Options": "DENY",
+            "X-Content-Type-Options": "nosniff",
+            "X-XSS-Protection": "1; mode=block",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Content-Security-Policy": (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "worker-src 'self' blob:; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "img-src 'self' data:; "
+                "font-src 'self' data: https://cdn.jsdelivr.net; "
+                "connect-src 'self';"
+            ),
+            "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+        }
+
+    @staticmethod
     def hash_password(password: str, salt: Optional[bytes] = None) -> str:
         """
         Hashes password with BCrypt (if available) or PBKDF2.

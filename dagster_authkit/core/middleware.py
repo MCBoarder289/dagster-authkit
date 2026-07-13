@@ -1,16 +1,21 @@
-# dagster_authkit/core/middleware.py
 """
-Authentication Middleware - Community RBAC Version
-NOW with Proxy Auth support (Authelia)
+Authentication Middleware — Pure ASGI (not BaseHTTPMiddleware).
+
+Why pure ASGI:
+- BaseHTTPMiddleware only handles scope["type"] == "http", so WebSocket
+  connections (Dagster GraphQL subscriptions at /graphql) bypass auth entirely.
+- Pure ASGI intercepts both HTTP and WebSocket scopes.
+- Also solves the CORS ordering problem: as a pure ASGI middleware we sit at the
+  right layer regardless of insert position.
 """
 
 import json
 import logging
 from typing import Optional
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from dagster_authkit.api.health import health_endpoint, metrics_endpoint, track_rbac_decision
 from dagster_authkit.auth.backends.base import Role, AuthUser, RolePermissions
@@ -24,18 +29,24 @@ from dagster_authkit.utils.templates import render_403_page
 
 logger = logging.getLogger(__name__)
 
+_WS_CLOSE_UNAUTHORIZED = 4001
 
-class DagsterAuthMiddleware(BaseHTTPMiddleware):
-    # --- Configuration ---
-    PUBLIC_PATHS: frozenset[str] = frozenset(
-        {
-            "/auth/login",
-            "/auth/logout",
-            "/auth/process",
-            "/auth/health",
-            "/auth/metrics",
-        }
-    )
+
+class DagsterAuthMiddleware:
+    """
+    Pure ASGI authentication middleware.
+
+    Handles both HTTP and WebSocket connections. WebSocket GraphQL
+    subscriptions at /graphql are authenticated via session cookie.
+    """
+
+    PUBLIC_PATHS: frozenset[str] = frozenset({
+        "/auth/login",
+        "/auth/logout",
+        "/auth/process",
+        "/auth/health",
+        "/auth/metrics",
+    })
 
     PUBLIC_PREFIXES: tuple[str, ...] = (
         "/auth/",
@@ -44,8 +55,8 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
 
     WRITE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 
-    def __init__(self, app):
-        super().__init__(app)
+    def __init__(self, app: ASGIApp):
+        self.app = app
 
         self.is_proxy_mode = config.AUTH_BACKEND == "proxy"
 
@@ -56,60 +67,110 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
             self.proxy_backend = None
             logger.info(f"Middleware: SESSION MODE (backend={config.AUTH_BACKEND})")
 
-        # Resolve default role for unknown GraphQL mutations (deny-by-default)
         self._unknown_mutation_role = Role[config.DAGSTER_AUTH_UNKNOWN_MUTATION_ROLE]
 
-    async def dispatch(self, request: Request, call_next):
+    # ================================================================
+    # ASGI entry point
+    # ================================================================
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "websocket":
+            await self._handle_websocket(scope, receive, send)
+        elif scope["type"] == "http":
+            await self._handle_http(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+    # ================================================================
+    # WebSocket handling
+    # ================================================================
+
+    async def _handle_websocket(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "/")
+
+        if self._is_public_path(path):
+            await self.app(scope, receive, send)
+            return
+
+        if self.is_proxy_mode:
+            user = self._get_user_from_ws_scope(scope)
+        else:
+            user = self._get_authenticated_user_from_scope(scope)
+
+        if not user:
+            logger.warning(f"WebSocket auth failed for {path}")
+            await send({"type": "websocket.accept"})
+            await send({"type": "websocket.close", "code": _WS_CLOSE_UNAUTHORIZED, "reason": "Unauthorized"})
+            return
+
+        logger.debug(f"WebSocket authenticated: {user.username} on {path}")
+        await self.app(scope, receive, send)
+
+    # ================================================================
+    # HTTP handling
+    # ================================================================
+
+    async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
         path = request.url.path
         method = request.method
 
-        # Let CORS preflight requests pass through unauthenticated.
-        # The Dagster CORS middleware runs below us and needs to respond
-        # to OPTIONS requests before any auth check is performed.
         if method == "OPTIONS":
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         if path == "/auth/health":
-            return await health_endpoint(request)
+            response = await health_endpoint(request)
+            await response(scope, receive, send)
+            return
 
         if path == "/auth/metrics":
-            return await metrics_endpoint(request)
+            response = await metrics_endpoint(request)
+            await response(scope, receive, send)
+            return
 
         if self.is_proxy_mode and path in ["/auth/login", "/auth/process"]:
-            return Response(
-                content="This endpoint is disabled in proxy auth mode. Authentication is handled by Authelia.",
+            response = Response(
+                content="This endpoint is disabled in proxy auth mode. "
+                        "Authentication is handled by Authelia.",
                 status_code=404,
             )
+            await response(scope, receive, send)
+            return
 
         if self._is_public_path(path) and not self.is_proxy_mode:
-            response = await call_next(request)
-            return SecurityHardening.set_security_headers(response)
+            await self._passthrough(scope, receive, send)
+            return
 
-        # PROXY or SESSION
+        # --- Authentication ---
         if self.is_proxy_mode:
             if not self._is_request_from_trusted_proxy(request):
-                return Response(
+                response = Response(
                     content="Unauthorized: Request did not come from a trusted proxy",
                     status_code=403,
                 )
+                await response(scope, receive, send)
+                return
+
             user = self._get_user_from_proxy(request)
             if not user:
-                return Response(
+                response = Response(
                     content="Unauthorized: Missing authentication headers from proxy",
                     status_code=401,
                 )
+                await response(scope, receive, send)
+                return
         else:
             user = self._get_authenticated_user(request)
             if not user:
-                # Better UX: 401 for APIs, 302 for humans
-                if (
-                    path == "/graphql"
-                    or request.headers.get("x-requested-with") == "XMLHttpRequest"
-                ):
-                    return Response(content="Unauthorized", status_code=401)
-                return RedirectResponse(url=f"/auth/login?next={path}", status_code=302)
+                if path == "/graphql" or request.headers.get("x-requested-with") == "XMLHttpRequest":
+                    response = Response(content="Unauthorized", status_code=401)
+                else:
+                    response = RedirectResponse(url=f"/auth/login?next={path}", status_code=302)
+                await response(scope, receive, send)
+                return
 
-        # RBAC: GraphQL Mutations
+        # --- RBAC: GraphQL HTTP mutations ---
         if path == "/graphql" and method == "POST":
             body = await request.body()
             graphql_data = self._parse_json(body)
@@ -120,11 +181,13 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
 
                 if not GraphQLMutationAnalyzer.is_parseable(query_str):
                     logger.warning(f"Rejected unparseable GraphQL query from {user.username}")
-                    return Response(
+                    response = Response(
                         content='{"errors":[{"message":"Invalid GraphQL query"}]}',
                         status_code=400,
                         media_type="application/json",
                     )
+                    await response(scope, receive, send)
+                    return
 
                 mutation_names = GraphQLMutationAnalyzer.extract_mutation_names(query_str)
 
@@ -133,75 +196,148 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
 
                 for mutation_name in mutation_names:
                     required_role = RolePermissions.get_required_role(
-                        mutation_name,
-                        default_role=self._unknown_mutation_role,
+                        mutation_name, default_role=self._unknown_mutation_role,
                     )
 
                     if required_role and not user.can(required_role):
                         self._log_denied(user, mutation_name, required_role)
-
-                        track_rbac_decision(
-                            allowed=False, role=user.role.name, action=mutation_name
-                        )
-
-                        return self._generate_dagster_error_response(
-                            user, mutation_name, required_role
-                        )
+                        track_rbac_decision(False, user.role.name, mutation_name)
+                        response = self._generate_dagster_error_response(user, mutation_name, required_role)
+                        await response(scope, receive, send)
+                        return
 
                     if required_role:
-                        track_rbac_decision(allowed=True, role=user.role.name, action=mutation_name)
+                        track_rbac_decision(True, user.role.name, mutation_name)
 
-            async def receive():
+            # Rebuild request with consumed body so downstream can read it
+            async def _receive():
                 return {"type": "http.request", "body": body}
 
-            request = Request(request.scope, receive=receive)
+            scope = dict(scope)
+            request = Request(scope, _receive)
 
-        # REST RBAC
         elif method in self.WRITE_METHODS and not user.can(Role.EDITOR):
             self._log_denied(user, f"REST_{method}_{path}", Role.EDITOR)
-            return self._forbidden_html_response(user, path, method, "REQUIRES_EDITOR")
+            response = self._forbidden_html_response(user, path, method, "REQUIRES_EDITOR")
+            await response(scope, receive, send)
+            return
 
-        request.state.user = user
-        response = await call_next(request)
-        return SecurityHardening.set_security_headers(response)
+        # Store user in scope for downstream handlers (e.g., UI injection)
+        scope = dict(scope)
+        if "state" not in scope:
+            scope["state"] = {}
+        scope["state"]["user"] = user
+
+        await self._passthrough(scope, receive, send)
+
+    async def _passthrough(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request to the inner app, injecting security headers on the response."""
+
+        async def _send(message):
+            if message["type"] == "http.response.start":
+                headers = dict(
+                    (k.decode("latin-1"), v.decode("latin-1"))
+                    for k, v in message.get("headers", [])
+                )
+                headers.update(SecurityHardening.get_security_headers())
+                message["headers"] = [
+                    (k.encode("latin-1"), v.encode("latin-1"))
+                    for k, v in headers.items()
+                ]
+            await send(message)
+
+        await self.app(scope, receive, _send)
+
+    # ================================================================
+    # User extraction (HTTP)
+    # ================================================================
 
     def _get_user_from_proxy(self, request: Request) -> Optional[AuthUser]:
-        """
-        Extrai user dos headers do Authelia (modo proxy).
-        """
         if not self.proxy_backend:
             return None
-
-        # Converte Starlette headers pra dict
         headers_dict = dict(request.headers)
-
-        # Usa o backend proxy pra parsear
         user = self.proxy_backend.get_user_from_headers(headers_dict)
-
         if user:
-            logger.debug(f"✅ Proxy auth: {user.username} ({user.role.name})")
+            logger.debug(f"Proxy auth: {user.username} ({user.role.name})")
         else:
-            logger.warning("❌ Proxy auth: Failed to extract user from headers")
-
+            logger.warning("Proxy auth: Failed to extract user from headers")
         return user
 
-    # Helper Methods
-    def _is_request_from_trusted_proxy(self, request: Request) -> bool:
-        """Check if the request originates from a trusted proxy IP.
+    def _get_authenticated_user(self, request: Request) -> Optional[AuthUser]:
+        token = request.cookies.get(config.SESSION_COOKIE_NAME)
+        if not token:
+            return None
+        user_data = sessions.validate(token)
+        if not user_data:
+            return None
+        try:
+            return AuthUser.from_dict(user_data)
+        except Exception as e:
+            logger.error(f"User deserialization failed: {e}")
+            return None
 
-        When DAGSTER_AUTH_PROXY_TRUSTED_IPS is empty, all IPs are trusted
-        (backward compatible). When set, only connections from those IPs
-        are allowed to use proxy auth headers.
-        """
+    # ================================================================
+    # User extraction (WebSocket scope)
+    # ================================================================
+
+    def _get_user_from_ws_scope(self, scope: Scope) -> Optional[AuthUser]:
+        if not self.proxy_backend:
+            return None
+        headers = self._scope_headers_to_dict(scope)
+        return self.proxy_backend.get_user_from_headers(headers)
+
+    def _get_authenticated_user_from_scope(self, scope: Scope) -> Optional[AuthUser]:
+        headers = self._scope_headers_to_dict(scope)
+        cookie_header = headers.get("cookie", "")
+        if not cookie_header:
+            return None
+        cookies = self._parse_cookie_header(cookie_header)
+        token = cookies.get(config.SESSION_COOKIE_NAME)
+        if not token:
+            return None
+        user_data = sessions.validate(token)
+        if not user_data:
+            return None
+        try:
+            return AuthUser.from_dict(user_data)
+        except Exception as e:
+            logger.error(f"User deserialization failed: {e}")
+            return None
+
+    @staticmethod
+    def _scope_headers_to_dict(scope: Scope) -> dict[str, str]:
+        result = {}
+        for key, value in scope.get("headers", []):
+            result[key.decode("latin-1").lower()] = value.decode("latin-1")
+        return result
+
+    @staticmethod
+    def _parse_cookie_header(header: str) -> dict[str, str]:
+        cookies = {}
+        for item in header.split(";"):
+            item = item.strip()
+            if "=" in item:
+                key, _, value = item.partition("=")
+                cookies[key.strip()] = value.strip()
+        return cookies
+
+    # ================================================================
+    # Shared helpers
+    # ================================================================
+
+    def _is_public_path(self, path: str) -> bool:
+        return path in self.PUBLIC_PATHS or any(
+            path.startswith(p) for p in self.PUBLIC_PREFIXES
+        )
+
+    def _is_request_from_trusted_proxy(self, request: Request) -> bool:
         trusted = config.DAGSTER_AUTH_PROXY_TRUSTED_IPS
         if not trusted:
             return True
-
         client_ip = request.client.host if request.client else None
         if client_ip is None:
             logger.warning("Cannot determine client IP for proxy trust check")
             return False
-
         is_trusted = client_ip in trusted
         if not is_trusted:
             logger.warning(
@@ -209,25 +345,6 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
                 f"(trusted: {sorted(trusted)})"
             )
         return is_trusted
-
-    def _get_authenticated_user(self, request: Request) -> Optional[AuthUser]:
-        token = request.cookies.get(config.SESSION_COOKIE_NAME)
-        if not token:
-            return None
-
-        # v1.0 CALL: Using the sessions singleton validate method
-        user_data = sessions.validate(token)
-        if not user_data:
-            return None
-
-        try:
-            return AuthUser.from_dict(user_data)
-        except Exception as e:
-            logger.error(f"User deserialization failed: {e}")
-            return None
-
-    def _is_public_path(self, path: str) -> bool:
-        return path in self.PUBLIC_PATHS or any(path.startswith(p) for p in self.PUBLIC_PREFIXES)
 
     @staticmethod
     def _log_denied(user, action, role):
@@ -249,7 +366,7 @@ class DagsterAuthMiddleware(BaseHTTPMiddleware):
             "data": {
                 mutation: {
                     "__typename": "PythonError",
-                    "message": f"🔒 Access Denied: {role.name} role required",
+                    "message": f"Access Denied: {role.name} role required",
                     "stack": [
                         f"Action: {mutation}\n",
                         f"User: {user.username} (role: {user.role.name})\n",
