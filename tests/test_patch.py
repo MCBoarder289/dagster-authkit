@@ -287,7 +287,8 @@ class TestBug3CspNonce:
             patch_module.original_index_html = original_backup
 
         body = response.body.decode()
-        assert 'nonce="abc123"' in body, (
+        injected_section = body.split("</body>")[0].split("<body>")[-1]
+        assert injected_section.count('nonce="abc123"') == 1, (
             "Injected <script> must carry nonce='abc123' copied from the page; "
             "without it the browser blocks the script (Bug 3 regression)"
         )
@@ -343,7 +344,7 @@ class TestBug3CspNonce:
         nonce_occurrences = injected_section.count('nonce="abc123"')
         # The original page nonce script is in <head>; the injected section
         # should have at most one nonce-stamped script tag.
-        assert nonce_occurrences <= 1
+        assert nonce_occurrences == 1
 
 
 # ---------------------------------------------------------------------------
@@ -363,10 +364,6 @@ class TestMiddlewareStateAlignment:
         After the middleware runs, scope['state'] must be a Starlette State
         object and scope['state'].user must be the AuthUser.
         """
-        import os
-        os.environ.setdefault("DAGSTER_AUTH_BACKEND", "proxy")
-        os.environ.setdefault("DAGSTER_AUTH_PROXY_TRUST_ALL", "true")
-
         from starlette.datastructures import State
         from dagster_authkit.core.middleware import DagsterAuthMiddleware
         from dagster_authkit.auth.backends.base import AuthUser, Role
@@ -375,8 +372,6 @@ class TestMiddlewareStateAlignment:
 
         async def mock_app(scope, receive, send):
             captured_scope.update(scope)
-
-        middleware = DagsterAuthMiddleware(mock_app)
 
         user = _make_user()
         headers = [
